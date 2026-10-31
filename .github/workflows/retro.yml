@@ -1,0 +1,141 @@
+# Daily retro (#151): yesterday's rework → lessons, so a mistake is paid for once.
+# 00:15 IST, as the first run of the new budget day, so a day that ran out of budget is still reviewed.
+# Free-time pattern (#122): the runner gathers facts and writes everything; the model reads and returns JSON.
+# A quiet day makes no model call. Stops when ORGROVE_ENABLED is not "true" (kill switch).
+name: retro
+on:
+  schedule:
+    - cron: "45 18 * * *"
+  workflow_dispatch:
+    inputs:
+      day:
+        description: "local day to review (YYYY-MM-DD); empty = yesterday"
+        type: string
+        default: ""
+permissions:
+  contents: read
+concurrency:
+  group: orgrove-retro
+  cancel-in-progress: false
+env:
+  CLAUDE_CODE_VERSION: "2.1.296"
+jobs:
+
+  retro:
+    if: ${{ !cancelled() && vars.ORGROVE_ENABLED == 'true' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.12"
+      - name: Install settings (config/org.toml, #159)
+        id: org
+        run: python -m orgrove.org >> "$GITHUB_OUTPUT"
+
+      - name: App token (read project issues, PRs and checks; comment and open escalation issues)
+        id: tok
+        uses: actions/create-github-app-token@64ab729a6294000f5aa4a4bc0b73d1f32bc45510 # v3.3.0
+        with:
+          app-id: ${{ vars.ORGROVE_APP_ID }}
+          private-key: ${{ secrets.ORGROVE_APP_PRIVATE_KEY }}
+          owner: ${{ steps.org.outputs.owner }}
+          repositories: ${{ steps.org.outputs.repositories }}
+          permission-contents: read
+          permission-issues: write
+          permission-pull-requests: read
+          permission-checks: read
+      # Contents write on orgrove ONLY: the ledger (reserve/settle) and the retro/<day> lessons branch + its PR.
+      - name: Ledger and lessons token (orgrove only)
+        id: ltok
+        uses: actions/create-github-app-token@64ab729a6294000f5aa4a4bc0b73d1f32bc45510 # v3.3.0
+        with:
+          app-id: ${{ vars.ORGROVE_APP_ID }}
+          private-key: ${{ secrets.ORGROVE_APP_PRIVATE_KEY }}
+          repositories: ${{ steps.org.outputs.repo_name }}
+          permission-contents: write
+          permission-pull-requests: write
+
+      - name: Collect yesterday (code only, $0)
+        id: facts
+        env:
+          GH_TOKEN: ${{ steps.tok.outputs.token }}
+          DAY: ${{ inputs.day }}
+        run: |
+          set -euo pipefail   # a crash must fail the step, not hide behind tee
+          python -m orgrove.retro collect ${DAY:+--day "$DAY"} --out "$RUNNER_TEMP/facts.json" | tee -a "$GITHUB_OUTPUT"
+          python -m orgrove.retro issue >> "$GITHUB_OUTPUT"
+
+      - name: Reserve budget
+        if: steps.facts.outputs.count != '0' && env.SKIP_RETRO != 'true'
+        id: reserve
+        env:
+          LTOK: ${{ steps.ltok.outputs.token }}
+          ORGROVE_LEDGER_DIR: ${{ runner.temp }}/ledger
+        run: |
+          set -u
+          bin/ledger-clone "${{ github.repository }}"
+          ceiling=$(python -c 'import tomllib; print(tomllib.load(open("config/retro.toml","rb"))["ceiling_usd"])')
+          run_id="${{ github.run_id }}-${{ github.run_attempt }}"
+          echo "run_id=$run_id" >> "$GITHUB_OUTPUT"
+          python -m orgrove.cli reserve --run-id "$run_id" --role retro \
+            --issue "${{ github.repository }}#${{ steps.facts.outputs.number }}" --ceiling "$ceiling"
+
+      - name: Install Claude Code and the retro instructions
+        if: steps.reserve.outcome == 'success'
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+        run: |
+          npm install -g --allow-scripts=@anthropic-ai/claude-code "@anthropic-ai/claude-code@${CLAUDE_CODE_VERSION}"
+          mkdir -p ~/.claude
+          umask 077
+          printf '%s' "$ANTHROPIC_API_KEY" > "$RUNNER_TEMP/anthropic.key"
+          printf '#!/bin/sh\ncat %s\n' "$RUNNER_TEMP/anthropic.key" > "$RUNNER_TEMP/key-helper.sh"
+          chmod 700 "$RUNNER_TEMP/key-helper.sh"
+          printf '{"apiKeyHelper": "%s"}\n' "$RUNNER_TEMP/key-helper.sh" > ~/.claude/settings.json
+
+      - name: Classify (the model reads only)
+        if: steps.reserve.outcome == 'success'
+        id: agent
+        run: |
+          python -m orgrove.retro prompt --facts "$RUNNER_TEMP/facts.json" \
+            --run-url "${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}" > "$RUNNER_TEMP/prompt.md"
+          model=$(python -c 'import tomllib; print(tomllib.load(open("config/retro.toml","rb"))["model"])')
+          ceiling=$(python -c 'import tomllib; print(tomllib.load(open("config/retro.toml","rb"))["ceiling_usd"])')
+          set +e
+          # The prompt goes in on stdin: as one argument, Linux caps it at 128 KB, and a big review diff
+          # (273 KB on orgrove#31, 2026-10-28) stopped the run before the model was called.
+          timeout 20m claude -p \
+            --setting-sources user \
+            --model "$model" \
+            --max-budget-usd "$ceiling" \
+            --append-system-prompt-file skills/retro/SKILL.md \
+            --output-format json \
+            --allowedTools Read Grep Glob < "$RUNNER_TEMP/prompt.md" > "$RUNNER_TEMP/result.json"
+          echo "rc=$?" >> "$GITHUB_OUTPUT"
+          python -m orgrove.agent_result "$RUNNER_TEMP/result.json" --label "retro" --debug "${{ vars.ORGROVE_DEBUG }}" || true
+
+      - name: Post the retro, the lessons PR and any escalation (the runner writes)
+        if: env.SKIP_RETRO != 'true'
+        env:
+          GH_TOKEN: ${{ steps.tok.outputs.token }}
+          LESSONS_TOKEN: ${{ steps.ltok.outputs.token }}
+        run: |
+          set -o pipefail
+          python -m orgrove.retro post --facts "$RUNNER_TEMP/facts.json" --result "$RUNNER_TEMP/result.json" \
+            --run-url "${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}" \
+            | tee -a "$GITHUB_STEP_SUMMARY"
+
+
+      - name: Settle real cost
+        if: always() && steps.reserve.outcome == 'success'
+        env:
+          ORGROVE_LEDGER_DIR: ${{ runner.temp }}/ledger
+        run: |
+          cost=$(python -c "import json,sys; print(json.load(open(sys.argv[1])).get('total_cost_usd',''))" "$RUNNER_TEMP/result.json" 2>/dev/null || true)
+          if [ -n "$cost" ]; then
+            python -m orgrove.cli settle --run-id "${{ steps.reserve.outputs.run_id }}" --usd "$cost"
+          else
+            echo "No cost reported: the reservation stays at its full ceiling."
+          fi

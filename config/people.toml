@@ -1,0 +1,8 @@
+# Who is who (#137): one name per office role, shown in the Office.
+# The department is always shown beside the name.
+pm       = "Ananya Iyer"
+dev      = "Arjun Mehta"
+qa       = "Kavya Reddy"
+security = "Vikram Rao"
+devops   = "Rohan Kulkarni"
+sanity   = "Ishaan Verma"

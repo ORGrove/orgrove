@@ -1,0 +1,68 @@
+name: ci
+on:
+  pull_request:
+  push:
+    branches: [main, 'agent/**']   # agent heads get CI before any review (#151)
+permissions:
+  contents: read
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.12"
+      - name: Config check (every install)
+        run: python -m orgrove.doctor --config
+      # ORGrove's own tests check its code against the publisher's config. An install (bin/package writes
+      # .orgrove-install) has its own config instead, so only the config check applies there (#159).
+      - name: ORGrove's own tests (where ORGrove is developed)
+        if: hashFiles('.orgrove-install') == ''
+        run: python -m unittest discover -s tests -t . -v
+      # A client copy must build from every change: its tests run on the copy, so a test that reads a file
+      # bin/package removes passed here but broke packaging (2026-10-30). A few seconds; no model call.
+      # Both editions (packaging/editions.toml): Community is refused if any Pro-only file or route is left in it.
+      - name: Both editions build (where ORGrove is developed)
+        if: hashFiles('.orgrove-install') == ''
+        run: |
+          bin/package --edition community "$RUNNER_TEMP/community"
+          bin/package --edition pro "$RUNNER_TEMP/pro"
+  workflows:
+    # actionlint parses every workflow, checks expressions and shellchecks run: blocks (#74).
+    # A workflow GitHub can't parse silently loses its triggers, so this gate is required.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: actionlint 1.7.12 (checksum-pinned)
+        run: |
+          set -eu
+          f=actionlint_1.7.12_linux_amd64.tar.gz
+          curl -fsSL -o "$RUNNER_TEMP/$f" "https://github.com/rhysd/actionlint/releases/download/v1.7.12/$f"
+          echo "8aca8db96f1b94770f1b0d72b6dddcb1ebb8123cb3712530b08cc387b349a3d8  $RUNNER_TEMP/$f" | sha256sum -c -
+          tar -xzf "$RUNNER_TEMP/$f" -C "$RUNNER_TEMP" actionlint
+          "$RUNNER_TEMP/actionlint" -color
+      # ORGrove Community's workflows lose the Pro-only blocks (packaging/editions.toml): lint them as shipped.
+      # Only where ORGrove is developed: a client's copy has no bin/package (v1.0.0's CI failed on it, 2026-10-30).
+      - name: actionlint on the Community copy's workflows (where ORGrove is developed)
+        if: hashFiles('.orgrove-install') == ''
+        run: |
+          set -eu
+          bin/package --edition community "$RUNNER_TEMP/community" > /dev/null
+          "$RUNNER_TEMP/actionlint" -color "$RUNNER_TEMP"/community/.github/workflows/*.yml
+  security:
+    # Ruff's S rules are Bandit's security checks, as one checksum-pinned binary (no pip dependency tree).
+    # S603/S607 are ignored on purpose: every subprocess call passes an argument list (never a shell)
+    # to gh/git/aws/ffmpeg on PATH, which is the safe form these rules ask you to confirm.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Ruff 0.17.0 security rules (checksum-pinned)
+        run: |
+          set -eu
+          f=ruff-x86_64-unknown-linux-gnu.tar.gz
+          curl -fsSL -o "$RUNNER_TEMP/$f" "https://github.com/astral-sh/ruff/releases/download/0.17.0/$f"
+          echo "c94fc1dc71f054d06d9f1149442dcb471516aa2b7d4b7e8124e05d082d4c91d3  $RUNNER_TEMP/$f" | sha256sum -c -
+          tar -xzf "$RUNNER_TEMP/$f" -C "$RUNNER_TEMP"
+          "$RUNNER_TEMP/ruff-x86_64-unknown-linux-gnu/ruff" check --no-cache --isolated --target-version py312 \
+            --select S --ignore S603,S607 --output-format github orgrove bin

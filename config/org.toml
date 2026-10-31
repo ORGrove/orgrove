@@ -1,0 +1,8 @@
+# ORGrove settings for this install. Run `python3 -m orgrove.init`: it asks a few questions and replaces this file.
+[github]
+owner = "YOUR-ORG"
+repo = "YOUR-ORG/orgrove"
+app_slug = "your-orgrove-app"
+app_user_id = 0
+
+[brand]

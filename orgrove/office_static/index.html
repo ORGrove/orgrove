@@ -1,0 +1,325 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="orgrove-csrf" content="__ORGROVE_CSRF__">
+<title>ORGrove Office</title>
+<link rel="icon" href="/brand/orgrove-symbol.png">
+<style>
+:root {
+  --bg: #f6f7f4; --panel: #ffffff; --ink: #1d2320; --muted: #66706b; --line: #e3e6e1;
+  --grove: #2f7d5b; --grove-soft: #e3f1ea; --warn: #b26b00; --warn-soft: #fbf0dd;
+  --bad: #b3261e; --bad-soft: #fbe6e4; --accent: #3a5ccc; --accent-soft: #e6ebfa;
+  --shadow: 0 1px 2px rgba(20,30,25,.06), 0 4px 14px rgba(20,30,25,.05);
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #111513; --panel: #181e1b; --ink: #e6ebe8; --muted: #93a09a; --line: #26302b;
+    --grove: #5cc293; --grove-soft: #173328; --warn: #f0b44c; --warn-soft: #33270f;
+    --bad: #f2786f; --bad-soft: #3a1b18; --accent: #8aa4ff; --accent-soft: #1c2440;
+    --shadow: none;
+  }
+}
+* { box-sizing: border-box; }
+body { margin: 0; background: var(--bg); color: var(--ink); font: 14px/1.45 -apple-system, BlinkMacSystemFont, "Segoe UI", Inter, sans-serif; }
+a { color: inherit; text-decoration: none; }
+a:hover { text-decoration: underline; }
+header { display: flex; flex-wrap: wrap; gap: 16px 28px; align-items: center; padding: 16px 24px; border-bottom: 1px solid var(--line); background: var(--panel); }
+.brand { display: flex; align-items: baseline; gap: 10px; }
+.brand b { font-size: 18px; letter-spacing: -.01em; }
+.brand span { color: var(--muted); }
+.pill { display: inline-flex; align-items: center; gap: 6px; padding: 3px 10px; border-radius: 999px; font-size: 12px; font-weight: 600; }
+.on { background: var(--grove-soft); color: var(--grove); }
+.off { background: var(--bad-soft); color: var(--bad); }
+.pills { display: flex; gap: 6px; }
+.pills button { font: inherit; font-size: 12px; font-weight: 600; padding: 4px 11px; border-radius: 999px; border: 1px solid var(--line); background: var(--panel); color: var(--muted); cursor: pointer; }
+.pills button.on { background: var(--accent-soft); color: var(--accent); border-color: var(--accent); }
+.tag.proj { background: var(--line); color: var(--ink); }
+.gauges { display: flex; gap: 22px; margin-left: auto; flex-wrap: wrap; }
+.gauge { min-width: 170px; }
+.gauge .lbl { display: flex; justify-content: space-between; color: var(--muted); font-size: 12px; }
+.gauge .lbl b { color: var(--ink); font-variant-numeric: tabular-nums; }
+.bar { height: 8px; border-radius: 4px; background: var(--line); overflow: hidden; margin-top: 4px; }
+.bar i { display: block; height: 100%; background: var(--grove); border-radius: 4px; transition: width .4s; }
+.bar i.hot { background: var(--warn); } .bar i.full { background: var(--bad); }
+main { display: grid; grid-template-columns: minmax(0, 1fr) 340px; gap: 18px; padding: 18px 24px; }
+@media (max-width: 1000px) { main { grid-template-columns: 1fr; } }
+.desks { display: grid; grid-template-columns: repeat(auto-fill, minmax(190px, 1fr)); gap: 10px; }
+.desks .desk { margin: 0; }
+section.panel { background: var(--panel); border: 1px solid var(--line); border-radius: 12px; box-shadow: var(--shadow); padding: 14px; min-width: 0; }
+h2 { margin: 0 0 10px; font-size: 12px; text-transform: uppercase; letter-spacing: .06em; color: var(--muted); }
+.desk { border: 1px solid var(--line); border-radius: 10px; padding: 10px 12px; margin-bottom: 8px; }
+.desk.working { border-color: var(--grove); background: var(--grove-soft); }
+.desk.break .dot { background: var(--warn); }
+.desk.ready { border-color: var(--warn); }
+.cup { color: var(--warn); font-weight: 600; }
+.ready-tag { display: inline-block; margin-left: 6px; font-size: 10.5px; font-weight: 700; padding: 1px 6px; border-radius: 4px; background: var(--warn-soft); color: var(--warn); }
+.desk .top { display: flex; align-items: center; gap: 8px; font-weight: 600; }
+.dot { width: 9px; height: 9px; border-radius: 50%; background: var(--line); flex: none; }
+.working .dot { background: var(--grove); animation: pulse 1.6s infinite; }
+@keyframes pulse { 0% { box-shadow: 0 0 0 0 rgba(47,125,91,.5); } 70% { box-shadow: 0 0 0 7px rgba(47,125,91,0); } 100% { box-shadow: 0 0 0 0 rgba(47,125,91,0); } }
+@media (prefers-reduced-motion: reduce) { .working .dot { animation: none; } }
+.desk .meta { color: var(--muted); font-size: 12px; margin-top: 2px; }
+.desk .task { margin-top: 6px; font-size: 12.5px; }
+.board { display: grid; grid-template-columns: repeat(8, minmax(118px, 1fr)); gap: 8px; overflow-x: auto; padding-bottom: 6px; }
+.col { background: var(--bg); border-radius: 10px; padding: 8px; min-height: 140px; max-height: 520px; overflow-y: auto; }
+.due { font-size: 10.5px; color: var(--muted); margin-left: auto; white-space: nowrap; }
+.due.late { color: var(--bad); font-weight: 700; }
+.due.none { color: var(--warn); }
+.months { display: grid; grid-template-columns: repeat(auto-fill, minmax(230px, 1fr)); gap: 10px; }
+.month { border: 1px solid var(--line); border-radius: 10px; padding: 10px; }
+.month h3 { margin: 0 0 6px; font-size: 13px; display: flex; justify-content: space-between; }
+.month.late h3 { color: var(--bad); } .month.none h3 { color: var(--warn); }
+.month a { display: flex; gap: 6px; font-size: 12px; padding: 3px 0; border-top: 1px solid var(--line); }
+.month a .d { color: var(--muted); margin-left: auto; white-space: nowrap; }
+.month .more { color: var(--muted); font-size: 12px; padding-top: 4px; }
+.col h3 { margin: 2px 4px 8px; font-size: 12px; display: flex; justify-content: space-between; color: var(--muted); }
+.col h3 .c { background: var(--line); color: var(--ink); border-radius: 999px; padding: 0 7px; font-size: 11px; }
+.col.human h3 { color: var(--accent); }
+tr.reserve td { color: var(--muted); }
+.card { display: block; background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 8px 9px; margin-bottom: 7px; }
+.card:hover { border-color: var(--accent); text-decoration: none; }
+.card .n { color: var(--muted); font-size: 11.5px; display: flex; flex-wrap: wrap; gap: 4px 6px; align-items: center; }
+.card .t { font-size: 12.5px; margin-top: 2px; display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; overflow: hidden; }
+.tag { font-size: 10.5px; padding: 1px 6px; border-radius: 4px; background: var(--accent-soft); color: var(--accent); font-weight: 600; }
+.tag.agent { background: var(--grove-soft); color: var(--grove); }
+.tag.flag { background: var(--warn-soft); color: var(--warn); }
+.tags { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 6px; }
+.inbox .item { border: 1px solid var(--line); border-radius: 8px; padding: 9px 10px; margin-bottom: 8px; }
+.inbox .q { white-space: pre-wrap; font-size: 12px; color: var(--muted); background: var(--bg); border-radius: 6px; padding: 7px 8px; margin: 6px 0; max-height: 140px; overflow-y: auto; }
+.inbox textarea { width: 100%; min-height: 54px; font: inherit; font-size: 12.5px; border: 1px solid var(--line); border-radius: 6px; padding: 6px; background: var(--panel); color: var(--ink); }
+.inbox .row { display: flex; gap: 8px; margin-top: 6px; align-items: center; flex-wrap: wrap; }
+.inbox button { font: inherit; font-size: 12px; font-weight: 700; border: 0; border-radius: 6px; padding: 5px 12px; cursor: pointer; background: var(--accent); color: #fff; }
+.inbox button:disabled { opacity: .45; cursor: not-allowed; }
+.inbox .note { font-size: 11.5px; color: var(--muted); }
+.inbox a { display: block; border: 1px solid var(--line); border-radius: 8px; padding: 9px 10px; margin-bottom: 8px; }
+.inbox .k { font-size: 11px; font-weight: 700; text-transform: uppercase; letter-spacing: .04em; }
+.k.merge { color: var(--accent); } .k.decision { color: var(--warn); } .k.budget { color: var(--bad); }
+.ci { float: right; font-size: 11px; color: var(--muted); }
+.ci.green { color: var(--grove); } .ci.failing { color: var(--bad); }
+.empty { color: var(--muted); font-size: 12.5px; padding: 6px 2px; }
+.wide { grid-column: 1 / -1; }
+.feeds { display: grid; grid-template-columns: 1fr 1fr; gap: 18px; }
+@media (max-width: 900px) { .feeds { grid-template-columns: 1fr; } }
+table { width: 100%; border-collapse: collapse; font-size: 12.5px; }
+td { padding: 5px 6px; border-top: 1px solid var(--line); vertical-align: top; }
+td.num { text-align: right; font-variant-numeric: tabular-nums; white-space: nowrap; }
+td.when { color: var(--muted); white-space: nowrap; }
+.st-success { color: var(--grove); } .st-failure, .st-cancelled { color: var(--bad); } .st-in_progress, .st-queued { color: var(--accent); }
+footer { color: var(--muted); font-size: 12px; padding: 0 24px 22px; }
+.why { margin: 14px 24px 0; padding: 12px 16px; border-radius: 12px; background: var(--warn-soft); color: var(--ink);
+  border: 1px solid var(--line); font-size: 14px; }
+.why b { color: var(--warn); } .why .sub { color: var(--muted); font-size: 12.5px; margin-top: 4px; }
+.why a { color: var(--accent); font-weight: 600; }
+.reason { font-size: 12.5px; margin-top: 4px; } .reason .r { font-weight: 700; }
+.reason.owner .r, .reason.budget .r { color: var(--warn); } .reason.sys .r { color: var(--bad); }
+.next { color: var(--muted); font-size: 12px; margin-top: 3px; } .next a { color: var(--accent); }
+.err { margin: 18px 24px; padding: 12px 14px; border-radius: 10px; background: var(--bad-soft); color: var(--bad); }
+.logos { display: flex; align-items: center; gap: 10px; }
+.logos img { display: block; width: auto; }
+.logos .product { height: 30px; }
+.logos .client { height: 18px; }
+.logos .client-name { font-size: 15px; letter-spacing: -.01em; }
+.logos .for { font-size: 11px; color: var(--muted); text-transform: uppercase; letter-spacing: .06em; padding-left: 10px; border-left: 1px solid var(--line); }
+.byline { text-align: center; color: var(--muted); font-size: 12px; padding: 28px 16px; }
+</style>
+</head>
+<body>
+<header>
+  <div class="logos">
+    <picture><source media="(prefers-color-scheme: dark)" srcset="/brand/orgrove-dark.png"><img class="product" src="/brand/orgrove-light.png" alt="ORGrove"></picture>
+    <!--ORGROVE_CLIENT-->
+  </div>
+  <div class="brand"><b>Office</b><span id="proj">loading…</span></div>
+  <div id="switch-proj" class="pills"></div>
+  <a href="/office3d.html" style="font-weight:700;color:var(--accent)">3D view ↗</a>
+  <span data-pro="finance"><a href="/finance" style="font-weight:700;color:var(--accent)">Finance</a> ·</span> <span data-pro="meetings"><a href="/office3d.html" style="font-weight:700;color:var(--accent)" title="Opens the 3D office: everyone walks to the meeting room">Call a meeting</a> · <a href="/meeting" style="color:var(--muted)">text meeting</a></span>
+<script type="module" src="/edition.js"></script>
+  <span id="switch" class="pill">…</span>
+  <div class="gauges">
+    <div class="gauge"><div class="lbl">Today <b id="g-day"></b></div><div class="bar"><i id="b-day"></i></div></div>
+    <div class="gauge"><div class="lbl">This month <b id="g-month"></b></div><div class="bar"><i id="b-month"></i></div></div>
+  </div>
+</header>
+<div id="why"></div>
+<div id="error"></div>
+<main>
+  <section class="panel wide"><h2>Pipeline</h2><div class="board" id="board"></div></section>
+  <section class="panel wide"><h2>Roadmap · target dates set by the PM <a id="rm-link" style="float:right;text-transform:none;letter-spacing:0"></a></h2><div class="months" id="roadmap"></div></section>
+  <section class="panel"><h2>Who's doing what · every idle agent says why</h2><div class="desks" id="roster"></div></section>
+  <section class="panel inbox"><h2>ORGrove Review · waiting on you</h2><div id="inbox"></div></section>
+  <section class="panel wide">
+    <div class="feeds">
+      <div><h2>Spend log (ledger)</h2><table id="feed"></table></div>
+      <div><h2>Agent runs</h2><table id="runs"></table></div>
+    </div>
+  </section>
+</main>
+<footer id="foot"></footer>
+<script src="/csrf.js"></script>
+<script>
+const $ = (id) => document.getElementById(id);
+const NAMES = { pm: "PM", dev: "Developer", qa: "QA", security: "Security", devops: "DevOps", sanity: "Sanity", gate: "Gate" };
+function el(tag, attrs = {}, ...kids) {
+  const n = document.createElement(tag);
+  for (const [k, v] of Object.entries(attrs)) {
+    if (k === "class") n.className = v; else if (k === "href") { n.href = v; n.target = "_blank"; n.rel = "noopener"; } else n.setAttribute(k, v);
+  }
+  for (const k of kids) n.append(k instanceof Node ? k : document.createTextNode(k ?? ""));
+  return n;
+}
+const usd = (x) => "$" + Number(x || 0).toFixed(2);
+const today = () => new Date().toISOString().slice(0, 10);
+const fmtDate = (d) => new Date(d + "T00:00:00").toLocaleDateString(undefined, { day: "numeric", month: "short" });
+const due = (k) => k.stage === "done" ? "" : !k.target ? el("span", { class: "due none" }, "no date")
+  : el("span", { class: "due" + (k.target < today() ? " late" : "") }, (k.target < today() ? "overdue " : "due ") + fmtDate(k.target));
+const ago = (iso) => {
+  if (!iso) return "";
+  const s = (Date.now() - new Date(iso)) / 1000;
+  if (s < 90) return "just now"; if (s < 5400) return Math.round(s / 60) + "m ago";
+  if (s < 129600) return Math.round(s / 3600) + "h ago"; return Math.round(s / 86400) + "d ago";
+};
+function gauge(bar, label, value, cap) {
+  const pct = Math.min(100, (value / cap) * 100);
+  bar.style.width = pct + "%";
+  bar.className = pct >= 100 ? "full" : pct >= 75 ? "hot" : "";
+  label.textContent = `${usd(value)} / ${usd(cap)}`;
+}
+let VIEW = "all", LAST = null;
+const KINDS = { merge: "PR to merge", decision: "Decision needed", budget: "Budget blocked", approval: "Draft to approve" };
+async function act(payload, statusEl, btn) {
+  btn.disabled = true; statusEl.textContent = "Working…";
+  try {
+    const r = await orgrovePost("/api/act", { headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload) });
+    const out = await r.json(); statusEl.textContent = out.message || (out.ok ? "Done." : "Refused.");
+    if (out.ok) setTimeout(tick, 4000); else btn.disabled = false;
+  } catch (e) { statusEl.textContent = "Couldn't reach the Office server: " + e; btn.disabled = false; }
+}
+function inboxItem(i) {
+  const head = el("div", {}, el("span", { class: "k " + i.kind }, KINDS[i.kind] || i.kind), " ",
+    i.ci ? el("span", { class: "ci " + i.ci }, "CI " + i.ci) : "",
+    el("div", {}, el("a", { href: i.url, style: "display:inline;border:0;padding:0;margin:0" }, `#${i.number}`), " ", i.title));
+  const status = el("span", { class: "note" });
+  if (i.kind === "merge") {
+    const open = el("button", {}, "Open PR ↗"); open.onclick = () => window.open(i.url, "_blank", "noopener");
+    const merge = el("button", {}, "Merge"); merge.disabled = i.ci !== "green";
+    merge.title = i.ci === "green" ? "Squash-merge (deploys to Dev)" : "Enabled when every CI check is green";
+    merge.onclick = () => { if (confirm(`Merge #${i.number}?\n\n${i.title}\n\nThis squash-merges and deploys to Dev.`)) act({ action: "merge", repo: i.repo, number: i.number }, status, merge); };
+    return el("div", { class: "item" }, head, el("div", { class: "row" }, open, merge, status));
+  }
+  if (i.kind === "approval") {
+    const yes = el("button", {}, "Approve"); yes.onclick = () => act({ action: "approve", repo: i.repo, number: i.number }, status, yes);
+    const no = el("button", { style: "background:var(--muted)" }, "Reject");
+    no.onclick = () => { if (confirm(`Reject and close draft #${i.number}?`)) act({ action: "reject", repo: i.repo, number: i.number }, status, no); };
+    return el("div", { class: "item" }, head, el("div", { class: "row" }, yes, no, status));
+  }
+  const box = el("textarea", { placeholder: i.answered ? "You've replied; the agent picks it up on the next tick. Add more here if needed…" : "Type your answer…" });
+  const send = el("button", {}, "Send reply");
+  send.onclick = () => { if (box.value.trim()) act({ action: "reply", repo: i.repo, number: i.number, text: box.value }, status, send); };
+  return el("div", { class: "item" }, head, i.question ? el("div", { class: "q" }, i.question) : "", box, el("div", { class: "row" }, send, status));
+}
+try { VIEW = localStorage.getItem("orgrove.view") || "all"; } catch (e) {}
+let NICE = {};  // project id -> display name, from each project profile's `name` (#159)
+function mergeRoadmaps(list) {
+  const by = new Map();
+  for (const p of list) for (const g of p.roadmap || []) {
+    const cur = by.get(g.month) || { month: g.month, count: 0, issues: [] };
+    cur.count += g.count; cur.issues.push(...g.issues); by.set(g.month, cur);
+  }
+  const rank = (m) => m === "Overdue" ? "0" : m === "No date" ? "9" : "1" + m;
+  return [...by.values()].sort((a, b) => rank(a.month).localeCompare(rank(b.month)))
+    .map((g) => ({ ...g, issues: g.issues.sort((a, b) => (a.target || "").localeCompare(b.target || "")) }));
+}
+function setView(v) { VIEW = v; try { localStorage.setItem("orgrove.view", v); } catch (e) {} if (LAST) render(LAST); }
+function render(s) {
+  LAST = s;
+  $("error").replaceChildren();
+  if (s.error) { $("error").append(el("div", { class: "err" }, "Could not load data: " + s.error)); return; }
+  if (s.stale) $("error").append(el("div", { class: "err" }, `Showing data from ${ago(s.generated)} — GitHub refused the last refresh (${s.stale.slice(0, 160)}). It retries every minute.`));
+  const inView = (x) => VIEW === "all" || x.project === VIEW;
+  NICE = Object.fromEntries((s.projects || []).map((p) => [p.id, p.name || p.id]));
+  if (VIEW !== "all" && !(s.projects || []).some((p) => p.id === VIEW)) VIEW = "all";  // project removed from config
+  const shown = (s.projects || []).filter((p) => VIEW === "all" || p.id === VIEW);
+  $("proj").textContent = `${VIEW === "all" ? "all projects" : NICE[VIEW] || VIEW} · ${s.department} · shared agents & budget`;
+  $("switch-proj").replaceChildren(...["all", ...(s.projects || []).map((p) => p.id)].map((id) =>
+    { const b = el("button", { class: id === VIEW ? "on" : "" }, id === "all" ? "All" : NICE[id] || id); b.onclick = () => setView(id); return b; }));
+  const projTag = (x) => VIEW === "all" && x.project ? el("span", { class: "tag proj" }, NICE[x.project] || x.project) : "";
+  const on = s.enabled === "true";
+  $("switch").className = "pill " + (on ? "on" : "off");
+  $("switch").textContent = on ? "● Agents enabled" : "■ Kill switch: agents stopped";
+  gauge($("b-day"), $("g-day"), s.spend.today, s.spend.daily_cap);
+  gauge($("b-month"), $("g-month"), s.spend.month, s.spend.monthly_cap);
+
+  // Why (#98): the dispatcher's own reason per agent, from its last tick; the Office adds only what time tells.
+  const W = s.why || { roles: {}, owner_waiting: [] };
+  const issueLink = (n, project) => {
+    const k = s.cards.find((c) => c.number === n && (!project || c.project === project));
+    return k ? el("a", { href: k.url, title: k.title }, `#${n}`) : el("span", {}, `#${n}`);
+  };
+  const kindOf = (r) => r.startsWith("budget") ? "budget" : r === "waiting_owner" ? "owner" : r === "unknown" ? "sys" : "";
+  const reasonLine = (st) => el("div", { class: "reason " + kindOf(st.reason) },
+    el("span", { class: "r" }, (st.reason === "on_break" || st.reason === "waiting_wakeup" ? "☕ " : "") + st.text),
+    st.detail ? ` · ${st.detail}` : "", ...(st.issues || []).flatMap((n) => [" ", issueLink(n, st.project)]));
+  const nextLine = (st) => (st.next || []).length
+    ? el("div", { class: "next" }, "Next: ", ...st.next.flatMap((n, i) => [i ? ", " : "", issueLink(n, st.project)])) : "";
+  $("why").replaceChildren(...(W.headline ? [el("div", { class: "why" },
+    el("b", {}, W.headline),
+    W.owner_waiting.length ? el("div", { class: "sub" }, "Waiting on you: ",
+      ...W.owner_waiting.slice(0, 8).flatMap((w, i) => [i ? " · " : "", `${w.what} `, issueLink(w.issue, w.project)])) : "",
+    el("div", { class: "sub" }, W.as_of ? `Dispatcher's last look: ${ago(W.as_of)}` + (W.budget_left != null ? ` · $${W.budget_left.toFixed(2)} left under the ${W.budget_kind} cap` : "")
+                                        : "No dispatcher status recorded yet."))] : []));
+  $("roster").replaceChildren(...s.roster.map((r) => {
+    const st = W.roles[r.role] || { reason: "unknown", text: "no status recorded yet", issues: [] };
+    return el("div", { class: "desk " + r.status },
+      el("div", { class: "top" }, el("span", { class: "dot" }), NAMES[r.role] || r.role),
+      el("div", { class: "meta" }, `${r.model.replace("claude-", "")} · limit ${usd(r.ceiling)}/run · today ${usd(s.spend.by_role[r.role])}`),
+      ...(r.status === "working" ? r.on.map((t) => el("div", { class: "task" }, "working on ", el("a", { href: t.url }, `#${t.number}`), " ", t.title))
+                                 : [reasonLine(st)]),
+      nextLine(st));
+  }));
+
+  $("board").replaceChildren(...s.columns.map((c) => {
+    const cards = s.cards.filter((k) => k.stage === c.id && inView(k));
+    return el("div", { class: "col" + (c.id === "awaiting-review" ? " human" : "") },
+      el("h3", {}, el("span", {}, c.id === "awaiting-review" ? "Awaiting you" : c.label), el("span", { class: "c" }, String(cards.length))),
+      ...cards.map((k) => el("a", { class: "card", href: k.url },
+        el("div", { class: "n" }, `#${k.number}`, projTag(k), k.priority ? el("span", { class: "tag" }, k.priority) : "", due(k)),
+        el("div", { class: "t" }, k.title),
+        el("div", { class: "tags" }, ...k.agents.map((a) => el("span", { class: "tag agent" }, "● " + a)),
+          ...k.flags.map((f) => el("span", { class: "tag flag" }, f))))));
+  }));
+
+  const monthName = (m) => m === "Overdue" || m === "No date" ? m : new Date(m + "-01T00:00:00").toLocaleDateString(undefined, { month: "long", year: "numeric" });
+  $("roadmap").replaceChildren(...mergeRoadmaps(shown).map((g) => el("div", { class: "month" + (g.month === "Overdue" ? " late" : g.month === "No date" ? " none" : "") },
+    el("h3", {}, el("span", {}, monthName(g.month)), el("span", { class: "c" }, String(g.count))),
+    ...g.issues.slice(0, 8).map((k) => el("a", { href: k.url }, `#${k.number}`, el("span", {}, k.title.length > 46 ? k.title.slice(0, 45) + "…" : k.title),
+      el("span", { class: "d" }, k.target ? fmtDate(k.target) : (k.priority || "")))),
+    g.count > 8 ? el("div", { class: "more" }, `+ ${g.count - 8} more`) : "")));
+  const rmUrl = (shown.find((p) => p.roadmap_url) || {}).roadmap_url;
+  { const a = $("rm-link"); if (rmUrl) { a.href = rmUrl; a.target = "_blank"; a.textContent = "roadmap issue ↗"; } else { a.textContent = ""; } }
+  const inbox = s.inbox.filter(inView);
+  $("inbox").replaceChildren(...(inbox.length ? inbox.map(inboxItem) : [el("div", { class: "empty" }, "Nothing waiting on you.")]));
+
+  const verbs = { reserve: "started (limit)", cost: "spent", refused: "refused" };
+  $("feed").replaceChildren(...(s.feed.length ? s.feed.map((e) => el("tr", { class: e.type },
+    el("td", { class: "when" }, ago(e.ts)), el("td", {}, `${NAMES[e.role] || e.role} ${verbs[e.type] || e.type}`),
+    el("td", {}, el("a", { href: `https://github.com/${e.issue.replace("#", "/issues/")}` }, e.issue.split("/").pop())),
+    el("td", { class: "num" }, e.type === "refused" ? "refused" : usd(e.usd)))) : [el("tr", {}, el("td", { class: "empty" }, "No spend this month."))]));
+
+  $("runs").replaceChildren(...s.runs.slice(0, 15).map((r) => el("tr", {},
+    el("td", { class: "when" }, ago(r.created)), el("td", {}, el("a", { href: r.url }, r.title)),
+    el("td", { class: "num st-" + (r.conclusion || r.status) }, r.conclusion || r.status))));
+
+  $("foot").replaceChildren("Live from GitHub · refreshed ", ago(s.generated), " · ", el("a", { href: s.ledger_url }, "open the ledger"),
+    " · every item links to its source; nothing here is simulated.");
+}
+async function tick() {
+  try { render(await (await fetch("/api/state", { cache: "no-store" })).json()); }
+  catch (e) { $("error").replaceChildren(el("div", { class: "err" }, "Office server not reachable: " + e)); }
+}
+tick(); setInterval(tick, 5000);   // local only: the server re-reads GitHub when the dispatcher has run
+</script>
+<footer class="byline">ORGrove · powered by OpsVision AI Systems Pvt Ltd</footer>
+</body>
+</html>

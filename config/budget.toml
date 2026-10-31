@@ -1,0 +1,20 @@
+# Budget gate (#3). Changing a cap is an owner decision: edit here, in a PR.
+daily_usd = 10.0   # hard cap per local day: the budget gate refuses a run that would pass it
+monthly_usd = 50.0   # hard cap per local month; keep the Anthropic Console limit close to it
+timezone = "UTC"   # "day" and "month" are measured in this zone
+max_run_ceiling_usd = 2.0   # no single run may reserve more than this
+default_run_ceiling_usd = 1.5
+
+[free_time]                 # orgrove#122 pilot (owner-approved plan, #123): short real work for an idle agent
+enabled = true              # the switch: false stops every free-time run (dispatcher and budget gate both check)
+roles = ["security"]        # pilot: Security only
+model = "claude-haiku-5-5"  # the free-time model; ticket runs keep their own model
+ceiling_usd = 0.30          # per run
+daily_usd = 0.30            # all free time in one local day; counted INSIDE daily_usd / monthly_usd above
+max_runs_per_day = 1
+idle_min = 30               # on a break at least this long, with nothing queued for the role
+hours = [10, 19]            # local office hours, start inclusive, end exclusive
+max_prs = 4                 # Dependabot PRs looked at per run
+
+[github_api]                # the App's GitHub allowance: 5,000 GraphQL points an hour, shared by every workflow
+graphql_reserve = 1000      # below this the dispatcher starts nothing until the allowance resets (2026-10-30 burst)

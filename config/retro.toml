@@ -1,0 +1,6 @@
+# Daily retro (#151). Runs at 00:15 IST (18:45 UTC) on the previous local day, as the first run of the new budget
+# day, so a day that ran out of budget is still reviewed. Its spend is reserved in the same ledger under the same caps.
+model = "claude-sonnet-5-5"
+ceiling_usd = 0.75             # a quiet day makes no model call and costs $0
+issue_title = "🔁 Daily retro"  # pinned issue in orgrove; one comment a day
+

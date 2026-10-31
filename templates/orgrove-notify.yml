@@ -1,0 +1,40 @@
+# ORGrove notify (#159): copy into each project repo as .github/workflows/orgrove-notify.yml.
+# When a person opens a ticket, comments or merges a PR, the control repo's dispatcher ticks at once instead of
+# waiting for GitHub's schedule (which can lag by hours). One billed minute per event; agents' comments are
+# skipped before a job starts, and a skipped job is not billed.
+# Needs, on this repo: variables ORGROVE_NOTIFY_APP_ID and ORGROVE_CONTROL_REPO (the control repo's name), and
+# secret ORGROVE_NOTIFY_PRIVATE_KEY. The notify App has one permission, Actions: write, on the control repo only:
+# it can start ORGrove's workflows and nothing else (INSTALL.md, By hand, step B2).
+name: orgrove-notify
+on:
+  issues:
+    types: [opened, reopened]
+  issue_comment:
+    types: [created]
+  pull_request:
+    types: [closed]
+permissions: {}
+jobs:
+  notify:
+    if: github.event.sender.type != 'Bot' && (github.event_name != 'pull_request' || github.event.pull_request.merged)
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    steps:
+      - name: Notify App token (Actions write on the control repo only)
+        id: tok
+        uses: actions/create-github-app-token@64ab729a6294000f5aa4a4bc0b73d1f32bc45510 # v3.3.0
+        with:
+          app-id: ${{ vars.ORGROVE_NOTIFY_APP_ID }}
+          private-key: ${{ secrets.ORGROVE_NOTIFY_PRIVATE_KEY }}
+          owner: ${{ github.repository_owner }}
+          repositories: ${{ vars.ORGROVE_CONTROL_REPO }}
+          permission-actions: write
+      - name: Start a dispatcher tick
+        env:
+          GH_TOKEN: ${{ steps.tok.outputs.token }}
+          CONTROL: ${{ github.repository_owner }}/${{ vars.ORGROVE_CONTROL_REPO }}
+        # REST only: the notify App has Actions write + Metadata read, and `gh workflow run` looks the default branch
+        # up through GraphQL, which that refuses (#159 sandbox, run 40836006294).
+        run: |
+          ref=$(gh api "repos/$CONTROL" --jq .default_branch)
+          gh api -X POST "repos/$CONTROL/actions/workflows/dispatch.yml/dispatches" -f ref="$ref"

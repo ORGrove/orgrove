@@ -1,0 +1,14 @@
+# Python build artefacts must never be committed
+__pycache__/
+*.py[cod]
+.venv/
+
+
+# Local Claude Code files stay out of git (AI-DLC was removed 2026-10-27). Only our own rule is versioned.
+.claude/*
+!.claude/rules/
+.claude/rules/*
+!.claude/rules/definition-of-done.md
+
+# Test coverage data written by local runs (bin/check)
+.coverage

@@ -1,0 +1,36 @@
+# Wake-up for the dispatcher: sleeps until the booked time, then starts one tick.
+# Started by dispatch.yml when nobody is working and the next tick has a reason (dispatch.wake_plan: a break ending
+# with work waiting, a follow-up after label changes, a review waiting for CI, a few spaced checks while waiting on
+# a person). GitHub's 10-minute schedule ran only every few hours on 2026-10-28 and not at all in a new
+# organisation's first hours (#159). A newer booking replaces an older one. Sleeping is billed: at most 20 minutes
+# per booking, and every reason is bounded.
+name: wake
+on:
+  workflow_dispatch:
+    inputs:
+      at:
+        description: "ISO time to start the next dispatcher tick"
+        type: string
+        required: true
+permissions:
+  contents: read
+  actions: write   # only to start dispatch.yml
+concurrency:
+  group: orgrove-wake
+  cancel-in-progress: true
+jobs:
+  wake:
+    if: vars.ORGROVE_ENABLED == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - name: Sleep until the break ends, then tick
+        env:
+          GH_TOKEN: ${{ github.token }}
+          AT: ${{ inputs.at }}
+        run: |
+          at=$(date -u -d "$AT" +%s)
+          wait=$(( at - $(date -u +%s) + 20 ))
+          if [ "$wait" -gt 1200 ]; then wait=1200; fi
+          if [ "$wait" -gt 0 ]; then sleep "$wait"; fi
+          gh workflow run dispatch.yml -R "$GITHUB_REPOSITORY"

@@ -1,0 +1,146 @@
+# Engineering pipeline (#2). The canonical stage of an issue is its single
+# `stage/*` label; the project board's Status is a coarse mirror of it.
+# Backlog = open issue with no stage label. Done = closed issue.
+
+department = "engineering"
+max_review_rounds = 3
+
+[[stage]]
+id = "planned"
+label = "stage/planned"
+board_status = "Ready"
+owner = "dev"
+
+[[stage]]
+id = "in-dev"
+label = "stage/in-dev"
+board_status = "In progress"
+owner = "dev"
+
+[[stage]]
+id = "agent-review"
+label = "stage/agent-review"
+board_status = "In progress"
+owner = ["qa", "security"]
+
+[[stage]]
+id = "awaiting-review"
+label = "stage/awaiting-review"
+board_status = "In review"
+owner = "human"
+
+[[stage]]
+id = "deployed-dev"
+label = "stage/deployed-dev"
+board_status = "In review"
+owner = "ci"
+
+[[stage]]
+id = "sanity"
+label = "stage/sanity"
+board_status = "In review"
+owner = "sanity"
+
+# Allowed transitions. Anything not listed is refused by the dispatcher (#7).
+[[transition]]
+from = "backlog"
+to = "planned"
+by = "pm"
+when = "acceptance criteria, security note, size and priority written"
+
+[[transition]]
+from = "planned"
+to = "in-dev"
+by = "dev"
+when = "branch agent/<issue>-<slug> created"
+
+[[transition]]
+from = "in-dev"
+to = "agent-review"
+by = "dev"
+when = "branch pushed, scoped tests and commands.contract green; reviews wait for CI on the head (#151)"
+
+[[transition]]
+from = "agent-review"
+to = "in-dev"
+by = "dispatcher"
+when = "CI is red on the head; nobody reviews it (#151). Counts as a round; adds needs/fix"
+
+[[transition]]
+from = "agent-review"
+to = "in-dev"
+by = ["qa", "security"]
+when = "a blocking finding was raised as a sub-issue; adds needs/fix"
+
+[[transition]]
+from = "agent-review"
+to = "awaiting-review"
+by = "dispatcher"
+when = "CI green on the head, QA and Security both approved it, no sub-issue open; bot opens the PR"
+
+[[transition]]
+from = "agent-review"
+to = "needs-human"
+by = "dispatcher"
+when = "review round > max_review_rounds"
+
+[[transition]]
+from = "awaiting-review"
+to = "deployed-dev"
+by = "human"
+when = "PR merged; the project's deploy succeeded"
+
+[[transition]]
+from = "deployed-dev"
+to = "sanity"
+by = "dispatcher"
+when = "Dev deploy finished"
+
+[[transition]]
+from = "deployed-dev"
+to = "backlog"
+by = "dispatcher"
+when = "Sanity passed the deployed build but the ticket is still open (it ships in chunks): back to the PM"
+
+[[transition]]
+from = "sanity"
+to = "done"
+by = "sanity"
+when = "smoke test and acceptance walkthrough passed; issue closed"
+
+[[transition]]
+from = "sanity"
+to = "in-dev"
+by = "sanity"
+when = "failed; a linked bug was raised"
+
+# Flag labels (orthogonal to stage).
+[flags]
+"needs/plan"     = "PM should plan this issue"
+"needs/roadmap"  = "PM should run the roadmap pass (dates for every open issue)"
+"needs/fix"      = "review or sanity raised blocking sub-issues"
+"needs/human"    = "ORGrove Review: a human decision, approval or budget is needed"
+"needs/approval" = "held for the owner: agents ignore it until the owner approves (removes this label)"
+"blocked/budget" = "the budget gate refused a run"
+"blocked/deps"   = "waits for the tickets named in its <!-- orgrove:after #n --> marker; the dispatcher releases it"
+"agent/pm"       = "a PM run is active on this issue"
+"agent/dev"      = "a Dev run is active on this issue"
+"agent/qa"       = "a QA run is active on this issue"
+"agent/security" = "a Security run is active on this issue"
+"agent/devops"   = "a DevOps run is active on this issue"
+"agent/sanity"   = "a Sanity run is active on this issue"
+
+# The other labels ORGrove writes, by repo (#159: a client install had none of them, so drafted tickets
+# and the hand-off of a failed deploy to DevOps were refused). init and sync_labels create them, doctor
+# checks them, and a test fails if the code or a skill uses a label that isn't here.
+[labels.project]
+"priority/p0" = "Urgent"
+"priority/p1" = "This week"
+"priority/p2" = "Soon"
+"priority/p3" = "Some day"
+"type/docs"   = "Documentation, minutes and other records"
+"area/infra"  = "Infrastructure: a failed deploy goes back to DevOps"
+"stage/done"  = "Closed: ORGrove is finished with this ticket"
+
+[labels.control]
+"needs/human"    = "A human decision is needed (for example, the retro's lessons PR couldn't open)"

@@ -1,0 +1,201 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="orgrove-csrf" content="__ORGROVE_CSRF__">
+<title>ORGrove Office · 3D</title>
+<link rel="icon" href="/brand/orgrove-symbol.png">
+<style>
+:root { --ink: #1f2430; --muted: #6b7280; --glass: rgba(255,255,255,.72); --line: rgba(31,36,48,.10);
+        --green: #2f9e6e; --amber: #c27a12; --red: #c2413a; --blue: #4f5fd6; --bg: #dcd5ca; }
+* { box-sizing: border-box; }
+html, body { margin: 0; height: 100%; overflow: hidden; background: var(--bg); color: var(--ink);
+  font: 14px/1.4 Inter, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; -webkit-font-smoothing: antialiased; }
+#scene { position: fixed; inset: 0; }
+.glass { position: fixed; z-index: 5; background: var(--glass); backdrop-filter: blur(14px) saturate(1.2);
+  -webkit-backdrop-filter: blur(14px) saturate(1.2); border: 1px solid var(--line); border-radius: 16px;
+  box-shadow: 0 10px 30px rgba(31,36,48,.08); }
+#strip { top: 16px; left: 16px; right: 16px; display: flex; align-items: center; gap: 22px; padding: 12px 18px; flex-wrap: wrap; }
+.brand { display: flex; flex-direction: column; line-height: 1.15; }
+.brand b { font-size: 15px; letter-spacing: -.01em; }
+.brand span { font-size: 12px; color: var(--muted); }
+.kpi { display: flex; flex-direction: column; min-width: 88px; }
+.kpi .v { font-size: 20px; font-weight: 700; letter-spacing: -.02em; font-variant-numeric: tabular-nums; }
+.kpi .l { font-size: 11px; color: var(--muted); text-transform: uppercase; letter-spacing: .06em; }
+.kpi.warn .v { color: var(--amber); } .kpi.bad .v { color: var(--red); } .kpi.good .v { color: var(--green); }
+.bar { height: 5px; width: 120px; border-radius: 3px; background: rgba(31,36,48,.1); overflow: hidden; margin-top: 4px; }
+.bar i { display: block; height: 100%; background: var(--green); border-radius: 3px; }
+.spacer { flex: 1; }
+.links a { color: var(--blue); font-weight: 600; text-decoration: none; margin-left: 14px; font-size: 13px; }
+#views { bottom: 16px; left: 50%; transform: translateX(-50%); display: flex; gap: 4px; padding: 6px; }
+#views button { font: inherit; font-size: 13px; font-weight: 600; border: 0; background: transparent; color: var(--muted);
+  padding: 7px 13px; border-radius: 10px; cursor: pointer; }
+#views button:hover { background: rgba(31,36,48,.06); color: var(--ink); }
+#views button.on { background: var(--ink); color: #fff; }
+#panel { top: 96px; right: 16px; width: 340px; max-height: calc(100vh - 180px); overflow-y: auto; padding: 18px; display: none; }
+#panel.open { display: block; }
+#panel h3 { margin: 0 0 2px; font-size: 17px; letter-spacing: -.01em; }
+#panel .sub { color: var(--muted); font-size: 12.5px; margin-bottom: 12px; }
+#panel .sec { font-size: 11px; text-transform: uppercase; letter-spacing: .06em; color: var(--muted); margin: 14px 0 6px; }
+#panel .row { display: flex; justify-content: space-between; gap: 10px; font-size: 13px; padding: 5px 0; border-top: 1px solid var(--line); }
+#panel .row:first-of-type { border-top: 0; }
+#panel a { color: var(--blue); text-decoration: none; }
+#panel .close { position: absolute; top: 12px; right: 14px; border: 0; background: transparent; font-size: 18px; cursor: pointer; color: var(--muted); }
+.chip { display: inline-block; font-size: 11.5px; font-weight: 700; padding: 2px 9px; border-radius: 999px; }
+.chip.work { background: #dff3e9; color: var(--green); } .chip.brk { background: #fbefd9; color: var(--amber); }
+#legend { bottom: 16px; left: 16px; padding: 10px 14px; font-size: 12px; color: var(--muted); max-width: 290px; }
+#legend b { color: var(--ink); }
+#err { color: var(--red); font-size: 12px; }
+body.meeting #legend { display: none !important; }
+/* in-scene labels */
+.tag { font: 600 11.5px/1.2 Inter, -apple-system, sans-serif; color: var(--ink); background: rgba(255,255,255,.92);
+  padding: 4px 9px 4px 8px; border-radius: 999px; white-space: nowrap; box-shadow: 0 2px 8px rgba(31,36,48,.12);
+  display: flex; align-items: center; gap: 6px; pointer-events: none; }
+.tag i { width: 7px; height: 7px; border-radius: 50%; display: inline-block; }
+.tag small { color: var(--muted); font-weight: 500; }
+/* Floor labels (Coffee, Lounge, ...) are hidden: the room says what it is (owner, 2026-10-30). */
+.zone { display: none; font: 700 11px Inter, -apple-system, sans-serif; letter-spacing: .12em; text-transform: uppercase;
+  color: rgba(31,36,48,.55); pointer-events: none; white-space: nowrap; }
+/* meetings (#102) */
+.btn { font: inherit; font-weight: 700; font-size: 13px; border: 0; border-radius: 10px; padding: 8px 14px; cursor: pointer;
+  background: var(--ink); color: #fff; }
+.btn.ghost { background: transparent; color: var(--muted); border: 1px solid var(--line); }
+.btn:disabled { opacity: .45; cursor: not-allowed; }
+#picker { top: 50%; left: 50%; transform: translate(-50%, -50%); width: min(920px, calc(100vw - 32px)); max-height: calc(100vh - 60px);
+  overflow-y: auto; padding: 22px; display: none; z-index: 20; }
+#picker.open { display: block; }
+#picker h2 { margin: 0 0 4px; font-size: 20px; letter-spacing: -.01em; }
+.types { display: grid; grid-template-columns: repeat(auto-fill, minmax(200px, 1fr)); gap: 10px; margin: 14px 0; }
+.type { text-align: left; font: inherit; border: 1px solid var(--line); background: rgba(255,255,255,.6); border-radius: 12px;
+  padding: 12px; cursor: pointer; color: var(--ink); }
+.type b { display: block; font-size: 14px; } .type span { color: var(--muted); font-size: 12px; }
+.type.on { border-color: var(--blue); box-shadow: 0 0 0 2px rgba(79,95,214,.25); background: #fff; }
+.who { display: flex; flex-wrap: wrap; gap: 6px; margin: 6px 0 10px; }
+.who i { font-style: normal; font-size: 12px; font-weight: 600; padding: 3px 10px; border-radius: 999px; background: rgba(31,36,48,.07); }
+#picker textarea, #dock input { width: 100%; font: inherit; border: 1px solid var(--line); border-radius: 10px; padding: 10px;
+  background: #fff; color: var(--ink); }
+#picker textarea { min-height: 70px; }
+#picker ol { margin: 6px 0 0 18px; padding: 0; font-size: 13px; }
+.prow { display: flex; gap: 10px; align-items: center; margin-top: 12px; flex-wrap: wrap; }
+#dock { bottom: 16px; left: 50%; transform: translateX(-50%); width: min(980px, calc(100vw - 32px)); padding: 14px 16px;
+  display: none; grid-template-columns: 1.1fr 1.5fr auto; gap: 16px; align-items: center; z-index: 15; }
+#dock.open { display: grid; }
+#dock .ag { font-size: 12.5px; } #dock .ag b { display: block; font-size: 14px; margin-bottom: 4px; }
+#dock .ag div { color: var(--muted); padding: 1px 0; } #dock .ag div.done { color: var(--green); } #dock .ag div.now { color: var(--ink); font-weight: 700; }
+#dock .live { font-size: 14px; min-height: 40px; } #dock .live small { display: block; color: var(--muted); font-size: 12px; margin-top: 3px; }
+#ptt { width: 74px; height: 74px; border-radius: 50%; border: 0; cursor: pointer; font-size: 26px; color: #fff;
+  background: radial-gradient(circle at 35% 30%, #6f7ce8, #3e4bc4); box-shadow: 0 8px 22px rgba(62,75,196,.35); touch-action: none; }
+#ptt.rec { background: radial-gradient(circle at 35% 30%, #f07a6e, #c2413a); animation: pulse 1s infinite; }
+#ptt:disabled { filter: grayscale(1); opacity: .5; cursor: not-allowed; }
+@keyframes pulse { 50% { box-shadow: 0 0 0 12px rgba(194,65,58,.15); } }
+#dock .side { display: flex; flex-direction: column; gap: 6px; align-items: center; }
+#dock .row2 { display: flex; gap: 6px; margin-top: 8px; }
+#mlog { display: none; position: fixed; top: 112px; right: 16px; width: min(400px, calc(100vw - 32px)); padding: 12px 14px; z-index: 6; }
+body.meeting #mlog { display: block; }
+#mlog .h { font-weight: 700; font-size: 13px; margin-bottom: 4px; }
+#mlog .log { max-height: calc(100vh - 420px); min-height: 60px; overflow-y: auto; font-size: 13.5px; line-height: 1.45; padding-right: 4px; }
+#mlog .log div { padding: 6px 0; border-bottom: 1px solid var(--line); } #mlog .log div:last-child { border-bottom: 0; }
+#mlog .log b { display: block; font-size: 11.5px; color: var(--muted); font-weight: 700; }
+#mlog .log .me b { color: var(--accent, #6b5bd6); } #mlog .log .hint { color: var(--muted); border: 0; }
+@media (max-width: 900px) { #mlog { top: auto; bottom: 330px; } #mlog .log { max-height: 160px; } }
+#dock .who2 { display: flex; flex-wrap: wrap; gap: 5px; margin-top: 6px; }
+#dock .chip { font: 600 12px Inter, -apple-system, sans-serif; border: 1px solid var(--line); background: transparent; color: var(--ink);
+  border-radius: 999px; padding: 3px 9px; cursor: pointer; } #dock .chip span { color: var(--muted); font-weight: 500; }
+#dock .chip.away { opacity: .55; border-style: dashed; }
+#result { top: 96px; left: 50%; transform: translateX(-50%); width: min(720px, calc(100vw - 32px)); max-height: calc(100vh - 260px);
+  overflow-y: auto; padding: 20px; display: none; z-index: 16; }
+#result.open { display: block; } #result h3 { margin: 0 0 6px; } #result pre { white-space: pre-wrap; font: inherit; font-size: 13px; }
+.bubble { font: 500 13px/1.35 Inter, -apple-system, sans-serif; color: var(--ink); background: #fff; padding: 9px 12px; border-radius: 14px;
+  max-width: 280px; box-shadow: 0 6px 18px rgba(31,36,48,.18); position: relative; transform: translateY(-14px); pointer-events: none; }
+.bubble::after { content: ""; position: absolute; left: 50%; bottom: -7px; margin-left: -7px; border: 7px solid transparent; border-bottom: 0; border-top-color: #fff; }
+.bubble b { display: block; font-size: 11px; text-transform: uppercase; letter-spacing: .06em; color: var(--blue); margin-bottom: 2px; }
+.bubble.cto { background: #1f2430; color: #fff; } .bubble.cto::after { border-top-color: #1f2430; } .bubble.cto b { color: #b9c2ff; }
+.bubble.think { font-size: 18px; letter-spacing: 2px; padding: 4px 12px; }
+.bubble.chat { font-size: 12px; max-width: 240px; background: #fffaf0; } .bubble.chat::after { border-top-color: #fffaf0; }
+.bubble.chat b { color: #c27a12; }
+@media (max-width: 760px) { #panel { left: 16px; right: 16px; width: auto; } .kpi .v { font-size: 16px; } #legend { display: none; }
+  #dock { grid-template-columns: 1fr; } }
+.tag.fx { font-size: 13px; padding: 6px 12px; box-shadow: 0 8px 24px rgba(31,36,48,.18); animation: fxpop .35s ease-out; }
+@keyframes fxpop { from { transform: scale(.6); opacity: 0; } to { transform: none; opacity: 1; } }
+@media (prefers-reduced-motion: reduce) { .tag.fx { animation: none; } }
+.logos { display: flex; align-items: center; gap: 10px; }
+.logos img { display: block; width: auto; }
+.logos .product { height: 30px; }
+.logos .client { height: 18px; }
+.logos .client-name { font-size: 15px; letter-spacing: -.01em; }
+.logos .for { font-size: 11px; color: var(--muted); text-transform: uppercase; letter-spacing: .06em; padding-left: 10px; border-left: 1px solid var(--line); }
+#byline { position: fixed; right: 16px; bottom: 22px; z-index: 4; font-size: 11px; color: var(--muted); }
+#views a.look { font-size: 12px; font-weight: 600; color: var(--muted); padding: 7px 10px; text-decoration: none; border-left: 1px solid var(--line); margin-left: 4px; }
+#views a.look:hover { color: var(--ink); }
+/* the new look's opening shot (office3d_new.js): chrome waits, a title card, a skip hint */
+#strip, #legend, #views, #byline { transition: opacity .9s ease; }
+body.intro #strip, body.intro #legend, body.intro #views, body.intro #byline { opacity: 0; pointer-events: none; }
+#title { position: fixed; z-index: 8; left: 50%; top: 42%; transform: translate(-50%, -50%) scale(.96); text-align: center;
+  opacity: 0; transition: opacity .9s ease, transform 1.4s ease; pointer-events: none; padding: 26px 40px; border-radius: 22px;
+  background: rgba(255,255,255,.78); backdrop-filter: blur(16px); -webkit-backdrop-filter: blur(16px); box-shadow: 0 20px 60px rgba(31,36,48,.18); }
+#title.show { opacity: 1; transform: translate(-50%, -50%) scale(1); }
+#title .row { display: flex; align-items: center; justify-content: center; gap: 16px; }
+#title img.product { height: 44px; } #title img.client { height: 30px; } #title b.client-name { font-size: 28px; }
+#title .x { font-size: 13px; text-transform: uppercase; letter-spacing: .14em; color: var(--muted); }
+#title p { margin: 12px 0 0; font-size: 17px; color: #4b5263; letter-spacing: -.01em; }
+#skip { position: fixed; z-index: 8; bottom: 22px; left: 50%; transform: translateX(-50%); font-size: 12px; color: rgba(255,255,255,.6);
+  opacity: 0; transition: opacity .6s; pointer-events: none; }
+body.intro #skip { opacity: 1; }
+@media (max-width: 1100px) { #byline { display: none; } }
+</style>
+<script type="importmap">
+{ "imports": { "three": "/vendor/three-0.186.1/three.module.js", "three/addons/": "/vendor/three-0.186.1/" } }
+</script>
+</head>
+<body>
+<div id="scene"></div>
+<div id="byline">ORGrove · powered by OpsVision AI Systems Pvt Ltd</div>
+<div id="strip" class="glass">
+  <div class="logos">
+    <img class="product" src="/brand/orgrove-light.png" alt="ORGrove">
+    <!--ORGROVE_CLIENT-->
+  </div>
+  <div class="brand"><b>Office</b><span id="sub">loading…</span></div>
+  <div class="kpi" id="k-work"><span class="v">–</span><span class="l">Working now</span></div>
+  <div class="kpi" id="k-wait"><span class="v">–</span><span class="l">Waiting on you</span></div>
+  <div class="kpi" id="k-health"><span class="v">–</span><span class="l">Ops health</span></div>
+  <div class="kpi" id="k-spend"><span class="v">–</span><span class="l">Spend today</span><div class="bar"><i id="b-spend"></i></div></div>
+  <div class="spacer"></div>
+  <span id="err"></span>
+  <span class="links"><button class="btn" id="callBtn" data-pro="meetings">Call a meeting</button><a href="/finance" data-pro="finance">Finance</a><a href="/">2D view</a></span>
+</div>
+<div id="panel" class="glass"><button class="close" id="pclose" aria-label="Close">×</button><div id="pbody"></div></div>
+<div id="views" class="glass"></div>
+<div id="picker" class="glass" role="dialog" aria-label="Call a meeting" data-pro="meetings">
+  <h2>Call a meeting</h2><div class="sub" style="color:var(--muted)">Pick the kind of meeting. Everyone invited walks to the meeting room; you lead it.</div>
+  <div class="types" id="types"></div>
+  <div id="tdetail"></div>
+  <textarea id="opening" placeholder="What's on your mind? (optional: hold the mic to speak, or type)"></textarea>
+  <div class="prow"><button class="btn" id="startBtn" disabled>Start meeting</button><button class="btn ghost" id="pmic">🎙 Hold to talk</button>
+    <button class="btn ghost" id="pcancel">Close</button><span class="sub" id="pnote" style="color:var(--muted);font-size:12px"></span></div>
+</div>
+<div id="dock" class="glass" data-pro="meetings">
+  <div class="ag" id="dagenda"></div>
+  <div><div class="live" id="dlive"></div>
+    <div class="who2" id="dwho"></div>
+    <div class="row2"><input id="dtype" placeholder="Type a question, tag who should answer (@Ananya, @qa, @all) and press Enter"><button class="btn ghost" id="dwrap">Wrap up</button><button class="btn ghost" id="dcancel">Cancel</button></div></div>
+  <div class="side"><button id="ptt" aria-label="Hold to dictate">🎙</button><span class="sub" style="color:var(--muted);font-size:11px">hold to dictate</span></div>
+</div>
+<div id="mlog" class="glass" data-pro="meetings"><div class="h">Conversation</div><div class="log" id="dlog"></div></div>
+<div id="result" class="glass" data-pro="meetings"></div>
+<div id="legend" class="glass">Everything here is live data. Who works, at which desk and on what is real: a run starts
+  (at the desk) or ends (a break). On a break, people do what people do for a few minutes at a time<span data-pro="news">, and chat about
+  recent AI news</span>. Celebrations follow real events. Click anyone, any room or the wallboard for detail.</div>
+<script src="/csrf.js"></script>
+<div id="title"><div class="row"><img class="product" src="/brand/orgrove-light.png" alt="ORGrove"><span class="x">for</span><span id="title-client"></span></div>
+  <p>Your AI engineering team, at work.</p></div>
+<div id="skip">Click to skip</div>
+<script type="module">
+  // The new look (office3d_new.js, ORGrove Pro) by default; ?look=classic, or a copy without it, shows the classic office.
+  const { EDITION } = await import("/edition.js");
+  const classic = !EDITION.new_look || new URLSearchParams(location.search).get("look") === "classic";
+  import(classic ? "/office3d.js" : "/office3d_new.js");
+</script>
+</body>
+</html>

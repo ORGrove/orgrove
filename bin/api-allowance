@@ -1,0 +1,7 @@
+#!/bin/sh
+# One line: how much of this token's hourly GitHub API allowance is left. On 2026-10-28 the ORGrove App ran out
+# at 22:47 IST and every dispatcher tick failed; nobody could tell which runs had used it. Calling /rate_limit is free.
+#
+#   bin/api-allowance [label]      (uses $GH_TOKEN)
+gh api rate_limit --jq '.resources | "GitHub API allowance left ('"${1:-this token}"'): REST \(.core.remaining)/\(.core.limit), GraphQL \(.graphql.remaining)/\(.graphql.limit), GraphQL resets \(.graphql.reset | todate)"' \
+  || echo "GitHub API allowance (${1:-this token}): not readable"
