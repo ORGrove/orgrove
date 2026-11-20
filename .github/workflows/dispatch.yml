@@ -12,6 +12,10 @@ on:
       dry_run:
         type: boolean
         default: false
+      probe:
+        description: Try the AI provider now, for an owner who raised its limit, instead of waiting up to 12 hours
+        type: boolean
+        default: false
   # A person acting in this repo when it is also a project (ORGrove's own repo is); other projects use
   # templates/orgrove-notify.yml. Agents' events are skipped below, before a runner starts (#159).
   issues:
@@ -89,6 +93,7 @@ jobs:
           LTOK: ${{ steps.ltok.outputs.token }}
           ORGROVE_UPDATE_TOKEN: ${{ steps.utok.outputs.token }}   # read by the #93 code once it merges
           ORGROVE_LEDGER_DIR: ${{ runner.temp }}/ledger
+          ORGROVE_PROBE: ${{ inputs.probe && 'true' || '' }}
         run: |
           set -o pipefail
           bin/ledger-clone "${{ github.repository }}"

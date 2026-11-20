@@ -135,7 +135,8 @@ jobs:
         run: |
           cost=$(python -c "import json,sys; print(json.load(open(sys.argv[1])).get('total_cost_usd',''))" "$RUNNER_TEMP/result.json" 2>/dev/null || true)
           if [ -n "$cost" ]; then
-            python -m orgrove.cli settle --run-id "${{ steps.reserve.outputs.run_id }}" --usd "$cost"
+            python -m orgrove.cli settle --run-id "${{ steps.reserve.outputs.run_id }}" --usd "$cost" \
+              --result-file "$RUNNER_TEMP/result.json"
           else
             echo "No cost reported: the reservation stays at its full ceiling."
           fi

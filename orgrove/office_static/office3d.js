@@ -7,8 +7,9 @@ import { OrbitControls } from "three/addons/OrbitControls.js";
 import { CSS2DRenderer, CSS2DObject } from "three/addons/CSS2DRenderer.js";
 import { RoomEnvironment } from "three/addons/RoomEnvironment.js";
 import { RoundedBoxGeometry } from "three/addons/RoundedBoxGeometry.js";
-import { placements, seatOf as seatIn } from "/office_place.js";
-import { LAYOUT, LOUNGE_SEATS } from "/layout_classic.js";
+import { placements, seatOf as seatIn, meetingRoom } from "/office_place.js";
+import { LAYOUT, LOUNGE_SEATS, FOOSBALL } from "/layout_classic.js";
+import { buildFoosball } from "/foosball.js";
 import { EDITION } from "/edition.js";
 
 // ---------- palette & roles --------------------------------------------------------------------
@@ -22,6 +23,7 @@ const ROLE = {
   qa:       { name: "QA",        team: "Quality & Security",  shirt: 0xf2b661 },
   security: { name: "Security",  team: "Quality & Security",  shirt: 0xef8a80 },
   sanity:   { name: "Sanity",    team: "Quality & Security",  shirt: 0x6cc9d6 },
+  delivery: { name: "Delivery", team: "Delivery",  shirt: 0xd98bb5 },
   cto:      { name: "CTO (you)", team: "Leadership",          shirt: 0x2f3542 },
   finance:  { name: "Finance",   team: "Finance",             shirt: 0x4fae9b },
 };
@@ -149,8 +151,8 @@ rbox(0.34, 0.22, 29.2, 0xb9ab97, -21.42, 0.11, 0, 0.04);
 // back row: meeting room (left; ORGrove Pro only), wallboard (centre), CTO cabin (right)
 const MT = new THREE.Vector3(-14, 0, -10.4);                 // meeting table centre
 // Seat 0 faces the agenda screen (the CTO's); the rest ring the table, everyone facing its centre.
-const MEETING_SEATS = [...Array(8)].map((_, i) => {
-  const a = Math.PI / 2 + i * (Math.PI * 2 / 8);
+const MEETING_SEATS = [...Array(13)].map((_, i) => {   // 13 seats, as the new look (2026-11-02)
+  const a = Math.PI / 2 + i * (Math.PI * 2 / 13);
   return [MT.x + Math.cos(a) * 2.35, MT.z + Math.sin(a) * 2.35];
 });
 const faceTable = (x, z) => Math.atan2(MT.x - x, MT.z - z);
@@ -176,6 +178,12 @@ rbox(3.2, 0.12, 1.4, C.oakDark, 14, 0.86, -11.4, 0.05); for (const dx of [-1.4, 
 rbox(0.8, 1.1, 0.8, 0x4b5563, 14, 0.55, -10.2, 0.2);
 const ctoLamp = new THREE.PointLight(0xffb84d, 0, 9); ctoLamp.position.set(14, 2.6, -10.2); scene.add(ctoLamp);
 const CTO_SEAT = { pos: new THREE.Vector3(14, 0, -10.0), face: Math.PI };
+// A talk with one or two people (2026-11-03) is at a small round table in front of the CTO's desk: seat 0 the CTO's.
+const CT = [14, -8.0], CABIN_SEATS = [[12.7, -8.0], [15.2, -7.4], [15.2, -8.6]];
+const faceCT = (x, z) => Math.atan2(CT[0] - x, CT[1] - z);
+if (EDITION.meetings) { cyl(0.6, 0.6, 0.08, C.oak, CT[0], 0.74, CT[1]); cyl(0.1, 0.18, 0.7, C.oakDark, CT[0], 0.36, CT[1]); }
+const meetSpot = (room, i) => (room === "cabin" ? CABIN_SEATS : MEETING_SEATS)[i];
+const meetFace = (room, x, z) => (room === "cabin" ? faceCT(x, z) : faceTable(x, z));
 // Finance controller (#78; ORGrove Pro only): a small desk between the wallboard and the CTO cabin.
 if (EDITION.finance) {
   rbox(2.4, 0.1, 1.2, C.oak, 7.4, 0.8, -11.3, 0.04); for (const sx of [-1.05, 1.05]) rbox(0.1, 0.76, 1.0, C.oakDark, 7.4 + sx, 0.4, -11.3, 0.03);
@@ -208,6 +216,8 @@ rbox(2.6, 2.2, 0.5, C.oakDark, -4.6, 1.1, 13.0, 0.06);                          
   rbox(0.26, 0.48, 0.3, [0x7c8cf8, 0xef8a80, 0xf2b661, 0x6fb98f, 0xb49af0, 0x6cc9d6][(i + row * 2) % 6], -5.55 + i * 0.38, y, 13.2, 0.03)));
 rbox(0.08, 1.5, 2.8, C.frame, -21.25, 1.65, 2.4, 0.03); rbox(0.06, 1.3, 2.6, 0xbfe0f5, -21.2, 1.65, 2.4, 0.02, { emissive: 0x7fb6d6, emissiveIntensity: 0.25 });  // window
 label("Break corner", "zone", -2.3, 0.1, 13.6);
+const foosball = buildFoosball(THREE, { mat });                                                                  // foosball (2026-11-03)
+foosball.group.position.set(FOOSBALL[0], 0, FOOSBALL[1]); foosball.group.scale.setScalar(1.6); scene.add(foosball.group);
 // News TV (#121): one real item every 8 s, from the same snapshot. Nothing here is filler.
 const tv = screenTexture(); tv.cv.width = 1200; tv.cv.height = 640; tv.tex = new THREE.CanvasTexture(tv.cv); tv.tex.colorSpace = THREE.SRGBColorSpace;
 const tvMesh = new THREE.Mesh(new RoundedBoxGeometry(5.6, 3.0, 0.12, 2, 0.06), [mat(0x20242c), mat(0x20242c), mat(0x20242c), mat(0x20242c),
@@ -315,7 +325,7 @@ function placeAll() {
     p.working = row.status === "working";
     let dest, pose, facing;
     if (at.where === "meeting") {                      // invited and free: walks to the meeting room
-      const [x, z] = MEETING_SEATS[at.index]; dest = V(x, z); pose = "sit"; facing = faceTable(x, z);
+      const [x, z] = meetSpot(at.room, at.index); dest = V(x, z); pose = "sit"; facing = meetFace(at.room, x, z);
     } else if (at.where === "desk") { dest = d.seat.clone(); pose = "type"; facing = d.face; }
     else if (at.where === "break") { dest = V(at.place[0], at.place[1]); facing = at.place[2]; pose = at.place[3]; }
     else { const [x, z] = LOUNGE_SEATS[at.index]; dest = V(x, z); pose = "sit"; facing = z > 11 ? Math.PI : 0; }
@@ -340,8 +350,8 @@ function placeAll() {
   for (const who of ALWAYS) {                                                 // not in the roster: always present
     const home = who === "cto" ? CTO_SEAT : FIN_SEAT;
     if (!people.has(who)) people.set(who, makePerson(who));
-    const p = people.get(who), seat = plan.at.get(who).seat;
-    if (seat >= 0) { const [x, z] = MEETING_SEATS[seat]; moveTo(p, V(x, z), "sit", faceTable(x, z)); }
+    const p = people.get(who), { seat, room } = plan.at.get(who);
+    if (seat >= 0) { const [x, z] = meetSpot(room, seat); moveTo(p, V(x, z), "sit", meetFace(room, x, z)); }
     else moveTo(p, home.pos.clone(), "sit", home.face);
     p.tag.visible = who === "finance" || seat >= 0;
     p.tag.element.innerHTML = `<i style="background:${who === "cto" ? "#1f2430" : "#4fae9b"}"></i>${esc(who === "cto" ? roleInfo(who).name : personLabel(who))}`
@@ -350,10 +360,11 @@ function placeAll() {
   placed = true;
   const resting = plan.resting;
   loungeTag.visible = resting > 0;
-  loungeTag.element.innerHTML = `<i style="background:#c27a12"></i>${resting} on a break <small>hover for names</small>`;
+  loungeTag.element.innerHTML = `<i style="background:#c27a12"></i>${resting} on a break <small>click one for the name</small>`;
   pingpong = plan.pingpong.map((role) => people.get(role));
+  foosers = (plan.foosball || []).map((role) => people.get(role));
 }
-let pingpong = [];
+let pingpong = [], foosers = [];
 
 function apply(s) {
   STATE = s;
@@ -517,7 +528,7 @@ function drawWallboard(s) {
 // ---------- detail panel --------------------------------------------------------------------------
 const panel = document.getElementById("panel"), pbody = document.getElementById("pbody");
 let openPanel = null;
-document.getElementById("pclose").onclick = () => { panel.classList.remove("open"); openPanel = null; };
+document.getElementById("pclose").onclick = () => { panel.classList.remove("open"); openPanel = null; selectedRole = null; };
 const link = (url, text) => url ? `<a href="${esc(url)}" target="_blank" rel="noopener">${esc(text)}</a>` : esc(text);
 function show(fn) { openPanel = fn; pbody.innerHTML = fn(); panel.classList.add("open"); }
 function cardLink(n, project) {
@@ -550,7 +561,7 @@ function roomPanel(id) {
   return () => {
     const s = STATE;
     if (id === "cto") {
-      const items = s.inbox || [], W = s.why || {}, held = W.owner_waiting || [];
+      const items = s.inbox || [], W = s.why || {}, held = (W.owner_waiting || []).filter((w) => !w.later);
       return `<h3>CTO cabin</h3><div class="sub">What's waiting on you. Act on it in the <a href="/">2D view</a>.</div>
         ${W.headline ? `<div class="sec">Team status</div><div><b>${esc(W.headline)}</b></div>
           <div class="sub">The dispatcher's own reasons (#98), from its last look ${W.age_min ?? "?"} min ago. Click anyone for theirs.</div>` : ""}
@@ -586,12 +597,18 @@ function hit(ev) {
 renderer.domElement.addEventListener("pointermove", (ev) => {
   const u = hit(ev); renderer.domElement.style.cursor = u?.kind ? "pointer" : "";
   const p = u?.kind === "agent" ? people.get(u.role) : null;
-  if (hovered && hovered !== p) { hovered.g.scale.setScalar(1); if (!hovered.working) hovered.tag.visible = false; }
-  if (p) { p.g.scale.setScalar(1.06); p.tag.visible = true; }
+  if (hovered && hovered !== p) hovered.g.scale.setScalar(1);
+  if (p) p.g.scale.setScalar(1.06);
   hovered = p;
 });
+// A person's name shows only for the one person clicked (owner, 2026-11-10: names over every head cluttered a group).
+// Clicking elsewhere or closing the panel hides it; dragging to orbit the camera does not count as a click.
+let selectedRole = null, downAt = null;
+renderer.domElement.addEventListener("pointerdown", (ev) => { downAt = [ev.clientX, ev.clientY]; });
 renderer.domElement.addEventListener("click", (ev) => {
-  const u = hit(ev); if (!u?.kind || !STATE) return;
+  if (downAt && Math.hypot(ev.clientX - downAt[0], ev.clientY - downAt[1]) > 5) return;
+  const u = hit(ev); selectedRole = u?.kind === "agent" ? u.role : null;
+  if (!u?.kind || !STATE) return;
   if (u.kind === "agent") show(u.role === "cto" ? roomPanel("cto") : agentPanel(u.role));  // the CTO's cabin is the CTO's view
   else if (u.kind === "room") show(roomPanel(u.id));
   else if (u.kind === "wall") show(wallPanel);
@@ -632,7 +649,8 @@ document.querySelector('#views button[data-v="Overview"]').classList.add("on");
 // only the people the CTO tagged answer, one at a time, as each model call returns. Nothing here invents a line.
 // Voice output is off (#138): replies are text above each person and in the meeting panel.
 const $ = (id) => document.getElementById(id);
-let TYPES = [], pickType = null, VOICE = false, pollTimer = null, sending = false;
+let lastRoom = null;
+let TYPES = [], pickType = null, invite = [], VOICE = false, pollTimer = null, sending = false;
 const shown = new Set(), revealQ = [];
 let revealing = null;
 
@@ -655,7 +673,8 @@ function setMeeting(m) {
   MTG = m;
   placeAll();
   meetLight.intensity = m.active ? 5 : 0;
-  if (m.active && !was) { panel.classList.remove("open"); go("Meeting"); }
+  if (m.active && (!was || meetingRoom(m) !== lastRoom)) { panel.classList.remove("open"); go(meetingRoom(m) === "cabin" ? "CTO cabin" : "Meeting"); }
+  lastRoom = meetingRoom(m);
   if (m.active && !pollTimer) pollTimer = setInterval(loadMeeting, 1500);   // local only: no GitHub calls
   if (!m.active && pollTimer) { clearInterval(pollTimer); pollTimer = null; }
   if (was && m.status === "closed") showResult(m);
@@ -734,7 +753,7 @@ function renderDock() {
   else if (MTG.status === "wrapping") line = `${esc(firstName("pm"))} is writing the minutes, decisions and draft tickets…`;
   else if (thinking) line = `${esc(thinking)} is thinking…`;
   else if (busy) line = "Replying…";
-  else if ([...people.values()].some((p) => p.path.length && seatOf(p.role) >= 0)) line = "Everyone is walking to the meeting room…";
+  else if ([...people.values()].some((p) => p.path.length && seatOf(p.role) >= 0)) line = meetingRoom(MTG) === "cabin" ? "Coming to your cabin…" : "Everyone is walking to the meeting room…";
   else line = `<b>Your turn.</b> Tag who should answer, e.g. <i>@${esc(firstName(MTG.host || "pm"))}</i>; no tag goes to ${esc(firstName(MTG.host || "pm"))}.`;
   if (MTG.error) line += `<div style="color:var(--red);font-size:12px;margin-top:4px">${esc(MTG.error)}</div>`;
   $("dlive").innerHTML = line + `<small>Spent $${Number(MTG.cost_usd || 0).toFixed(3)} of $1.50 · each reply is a separate AI call</small>`;
@@ -803,15 +822,25 @@ addEventListener("keyup", (e) => { if (e.code === "Space" && rec) { e.preventDef
 
 // ---- calling a meeting --------------------------------------------------------------------------------
 function openPicker() {
-  if (MTG?.active) { go("Meeting"); return; }
+  if (MTG?.active) { go(meetingRoom(MTG) === "cabin" ? "CTO cabin" : "Meeting"); return; }
   $("types").innerHTML = TYPES.map((t) => `<button class="type${t.id === pickType ? " on" : ""}" data-t="${esc(t.id)}"><b>${esc(t.title)}</b><span>${esc(t.purpose)}</span></button>`).join("")
     || `<div class="sub">Meeting types couldn't be loaded.</div>`;
   document.querySelectorAll("#types .type").forEach((b) => b.onclick = () => { pickType = b.dataset.t; openPicker(); });
   const t = TYPES.find((x) => x.id === pickType);
-  $("tdetail").innerHTML = t ? `<div class="who">${t.participants.map((p) => `<i>${esc(p.name ? p.name.split(" ")[0] + " · " : "")}${esc(p.title)}</i>`).join("")}<i>You (CTO)</i></div>
-    <b style="font-size:13px">Agenda</b><ol>${t.agenda.map((a) => `<li>${esc(a)}</li>`).join("")}</ol>` : "";
-  $("opening").placeholder = t ? `Optional first message, e.g. "@${(t.participants[0]?.name || "Ananya").split(" ")[0]} ${t.opening}" Leave empty to start quietly.` : "What's on your mind?";
-  $("startBtn").disabled = !t; $("pmic").disabled = !VOICE;
+  // A type with `pick` (a talk in the CTO's cabin): the CTO chooses one or two people; the rest come only if tagged.
+  const who = t?.pick ? t.choices.filter((p) => invite.includes(p.id)) : t?.participants || [];
+  const chips = t?.pick
+    ? `<div class="sub" style="margin-top:6px">Who comes? Pick ${t.pick === 2 ? "one or two" : "up to " + t.pick} (more can join later if you tag them).</div><div class="who">${t.choices.map((p) =>
+        `<button class="pick${invite.includes(p.id) ? " on" : ""}" data-p="${esc(p.id)}">${esc(p.name ? p.name.split(" ")[0] + " · " : "")}${esc(p.title)}</button>`).join("")}</div>`
+    : `<div class="who">${who.map((p) => `<i>${esc(p.name ? p.name.split(" ")[0] + " · " : "")}${esc(p.title)}</i>`).join("")}<i>You (CTO)</i></div>`;
+  $("tdetail").innerHTML = t ? `${chips}<b style="font-size:13px">Agenda</b><ol>${t.agenda.map((a) => `<li>${esc(a)}</li>`).join("")}</ol>` : "";
+  document.querySelectorAll("#tdetail .pick").forEach((b) => b.onclick = () => {
+    const id = b.dataset.p;
+    invite = invite.includes(id) ? invite.filter((x) => x !== id) : [...invite, id].slice(-t.pick);
+    openPicker();
+  });
+  $("opening").placeholder = t ? `Optional first message, e.g. "@${(who[0]?.name || "Ananya").split(" ")[0]} ${t.opening}" Leave empty to start quietly.` : "What's on your mind?";
+  $("startBtn").disabled = !t || (t.pick && !invite.length); $("pmic").disabled = !VOICE;
   $("pnote").textContent = "Reserves up to $1.50 of today's budget first. Only the people you tag answer; each reply is a separate AI call.";
   $("picker").classList.add("open");
 }
@@ -823,8 +852,8 @@ for (const ev of ["pointerup", "pointerleave", "pointercancel"]) pmic.addEventLi
   const box = $("opening"); box.value = (box.value ? box.value.trimEnd() + " " : "") + t; }));
 $("startBtn").onclick = async () => {
   $("startBtn").disabled = true; $("pnote").textContent = "Reserving budget and calling everyone in…";
-  try { const m = await post({ op: "start", type: pickType, text: $("opening").value.trim() });
-    $("picker").classList.remove("open"); $("opening").value = ""; setMeeting(m); }
+  try { const m = await post({ op: "start", type: pickType, text: $("opening").value.trim(), invite: TYPES.find((x) => x.id === pickType)?.pick ? invite : [] });
+    $("picker").classList.remove("open"); $("opening").value = ""; invite = []; setMeeting(m); }
   catch (e) { $("pnote").textContent = e.message; $("startBtn").disabled = false; }
 };
 
@@ -917,14 +946,17 @@ renderer.setAnimationLoop(() => {
       else if (p.pose === "sip") aR = -1.3 - (Math.sin(t * 0.7 + p.role.length) > 0.6 ? 0.6 * m : 0);   // the occasional sip
       else if (p.pose === "play") aR = -0.7 + Math.sin(t * 4.4) * 0.6 * m;
       else if (p.pose === "read") aL = aR = -1.1;
+      else if (p.pose === "foos") { aL = -1.25 + Math.sin(t * 7 + 1) * 0.12 * m; aR = -1.25 + Math.sin(t * 6) * 0.12 * m; }
       p.armL.rotation.x = aL; p.armR.rotation.x = aR; p.armL.rotation.z = zL; p.armR.rotation.z = zR;
     }
   }
+  foosball.update(t, foosers.filter((p) => p && !p.path.length).length === 2 && !still);
   const players = pingpong.filter((p) => p && !p.path.length);   // a rally needs both players in place
   ball.visible = players.length === 2 && !still;
   if (ball.visible) ball.position.set(Math.sin(t * 2.2) * 1.5, 0.9 + Math.abs(Math.cos(t * 4.4)) * 0.4, 10.2);
   for (let i = fx.length - 1; i >= 0; i--) if (!fx[i](dt)) fx.splice(i, 1);
   controls.update();
   renderer.render(scene, camera);
+  for (const p of people.values()) p.tag.visible = p.role === selectedRole && !p.bubble.visible;   // names only on click; a speech bubble names its speaker
   labels.render(scene, camera);
 });

@@ -2,7 +2,7 @@
 
     ./install                 (the same as python3 -m orgrove.install)
 
-Asks about five things, then does the rest: the control repo, both GitHub Apps (two clicks each, on GitHub's own
+Asks about five things, then does the rest: the control repo, the three GitHub Apps (two clicks each, on GitHub's own
 pages, through the App Manifest flow: nobody downloads a key or copies an ID), every secret and variable, the
 project repo's CI and notify workflow, the config, the checks, and switching the agents on. Each step checks
 first and acts only if needed, so running it again continues where it stopped. Progress (names and IDs, never a
@@ -47,6 +47,8 @@ SCOPES = ("repo", "workflow", "read:org", "project")
 # 2.23, so an older gh is refused up front instead of failing midway (2026-10-31; tested on Ubuntu 24.04's 2.45).
 GH_MIN = (2, 40)
 ANTHROPIC_MODELS = "https://api.anthropic.com/v1/models"
+ANTHROPIC_MESSAGES = "https://api.anthropic.com/v1/messages"
+PROBE_MODEL = "claude-haiku-5-5"     # the cheapest model ORGrove uses: the check below asks it one word, max_tokens 1
 GITHUB_API = "https://api.github.com"
 
 
@@ -110,6 +112,34 @@ def key_accepted(key, opener=urllib.request.urlopen):
         return False if e.code in (401, 403) else None
     except (urllib.error.URLError, OSError):
         return None
+
+
+def key_usable(key, opener=urllib.request.urlopen):
+    """(True, "") when the key can really make a request, (False, plain words) when Anthropic says it can't, and
+    (None, "") when that can't be told (offline, a model the workspace lacks, a busy moment). The free model list
+    only proves the key exists: a workspace at its spending limit passed it, and the first agent run then failed
+    (rehearsal, 2026-11-10). This asks for one token from the cheapest model: a fraction of a cent."""
+    body = json.dumps({"model": PROBE_MODEL, "max_tokens": 1, "messages": [{"role": "user", "content": "hi"}]}).encode()
+    req = urllib.request.Request(ANTHROPIC_MESSAGES, data=body, method="POST", headers={
+        "x-api-key": key, "anthropic-version": "2023-06-01", "content-type": "application/json"})
+    try:
+        with opener(req, timeout=30):  # noqa: S310  a fixed https constant
+            return True, ""
+    except urllib.error.HTTPError as e:
+        try:
+            said = json.loads(e.read().decode("utf-8", "replace")).get("error", {}).get("message", "")
+        except (ValueError, OSError, AttributeError):
+            said = ""
+        if e.code in (401, 403):
+            return False, "Anthropic refused that key (revoked, or a typo)"
+        if e.code == 400 and "usage limit" in said.lower():
+            back = re.search(r"regain access on (\d{4}-\d{2}-\d{2})", said)
+            until = f" until {back.group(1)}" if back else ""
+            return False, (f"that key's workspace has reached its spending limit and will not work{until}. Raise the "
+                           "limit at platform.claude.com > Settings > Limits, or paste a key from another workspace")
+        return None, ""
+    except (urllib.error.URLError, OSError):
+        return None, ""
 
 
 def detect_commands(files, read):
@@ -188,11 +218,12 @@ def github(method, path, token=None, scheme="Bearer", opener=urllib.request.urlo
 # --- the two-click GitHub App flow ------------------------------------------------------------------------------
 
 class AppFlow:
+    BACK = "go back to the terminal"     # the web installer says "the installer"
     """GitHub's App Manifest flow on 127.0.0.1: GitHub's pre-filled "Create GitHub App" page, then its install page.
     `on_created(conversion)` runs as soon as GitHub hands over the App (id, slug and private key): it stores the key
     in a GitHub secret at once, so no key is ever written to disk or shown. Proven live on 2026-10-29 (plan)."""
 
-    def __init__(self, owner, app_manifest, repos_hint, on_created, exchange=None, port=0):
+    def __init__(self, owner, app_manifest, repos_hint, on_created, exchange=None, port=0, step=None):
         self.owner, self.manifest, self.repos_hint, self.on_created = owner, app_manifest, repos_hint, on_created
         self.exchange = exchange or (lambda code: github("POST", f"/app-manifests/{code}/conversions"))
         self.state = secrets.token_urlsafe(16)
@@ -209,7 +240,7 @@ class AppFlow:
 
         self.server = HTTPServer(("127.0.0.1", port), Handler)
         self.base = f"http://127.0.0.1:{self.server.server_port}"
-        self.manifest = {**app_manifest, "redirect_url": f"{self.base}/created", "setup_url": f"{self.base}/installed"}
+        self.manifest = {**app_manifest, "redirect_url": f"{self.base}/created", "setup_url": f"{self.base}/installed/{self.state}"}
 
     def page(self, req, body, status=200):
         req.send_response(status)
@@ -227,23 +258,23 @@ class AppFlow:
 <button>Continue to GitHub</button></form><script>document.getElementById('f').submit()</script>""")
         elif path == "/created":
             if q.get("state") != self.state or not q.get("code"):
-                return self.page(req, "<p>This link isn't from this install. Go back to the terminal.</p>", 400)
+                return self.page(req, f"<p>This link isn't from this install. {self.BACK.capitalize()}.</p>", 400)
             try:
                 conv = self.exchange(q["code"])
                 self.on_created(conv)   # stores the key in a GitHub secret before anything else
             except Exception as e:  # noqa: BLE001  shown on the page and in the terminal, never swallowed
                 self.result.update(error=str(e)[:300], installation="")
                 return self.page(req, f"<p>Something went wrong: {html.escape(str(e)[:300])}</p>"
-                                      "<p>Go back to the terminal.</p>", 500)
+                                      f"<p>{self.BACK.capitalize()}.</p>", 500)
             self.result.update(id=conv["id"], slug=conv["slug"], pem=conv["pem"])
             repos = ", ".join(f"<b>{html.escape(r)}</b>" for r in self.repos_hint)
             self.page(req, f"""<p>✓ Created <b>{html.escape(conv['slug'])}</b>.</p>
 <p>Next, install it. On GitHub's page choose <b>Only select repositories</b>, pick {repos}, and click
 <b>Install</b>.</p><p><a href="https://github.com/apps/{html.escape(conv['slug'])}/installations/new">Install it
 on GitHub</a></p>""")
-        elif path == "/installed":
+        elif path == f"/installed/{self.state}":    # GitHub's setup redirect; the state in the path guards it
             self.result["installation"] = q.get("installation_id", "")
-            self.page(req, "<p>✓ Installed. You can close this tab and go back to the terminal.</p>")
+            self.page(req, f"<p>✓ Installed. You can close this tab and {self.BACK}.</p>")
         else:
             self.page(req, "<p>Not found.</p>", 404)
 
@@ -282,7 +313,10 @@ def app_manifest(name, owner, permissions, description):
 
 class Installer:
     def __init__(self, root=manifest.ROOT, run=gh, ask=input, ask_secret=getpass.getpass, out=print,
-                 open_url=webbrowser.open, installs=INSTALLS, app_flow=AppFlow, sleep=time.sleep, git_run=git, port=0):
+                 open_url=webbrowser.open, installs=INSTALLS, app_flow=AppFlow, sleep=time.sleep, git_run=git, port=0,
+                 interactive=None):
+        # a command only a person can run (gh's own device login): the terminal runs it, the web installer asks them to
+        self.interactive = interactive or (lambda cmd: subprocess.run(cmd, check=False))
         self.port = port       # the App pages' local port: 0 = any free one; fixed for SSH or Docker forwarding
         self.root, self.gh, self.ask_raw, self.ask_secret, self.out = root, run, ask, ask_secret, out
         self.open_url, self.installs, self.app_flow, self.sleep, self.git = open_url, installs, app_flow, sleep, git_run
@@ -344,7 +378,12 @@ class Installer:
         missing = [s for s in SCOPES if s not in have]
         if missing:
             self.out(f"  the GitHub CLI needs more access ({', '.join(missing)}); GitHub will ask you to approve it")
-            subprocess.run(["gh", "auth", "refresh", "-h", "github.com", "-s", ",".join(missing)], check=False)
+            self.interactive(["gh", "auth", "refresh", "-h", "github.com", "-s", ",".join(missing)])
+            ok, status = self.gh("auth", "status")
+            still = [s for s in SCOPES if s not in set(re.findall(r"'([a-z:_]+)'", str(status)))]
+            if still:
+                raise SystemExit(f"the GitHub CLI still lacks access ({', '.join(still)}): run "
+                                 f"`gh auth refresh -h github.com -s {','.join(still)}`, then try again")
         ok, login = self.gh("api", "user", "--jq", ".login")
         if not ok:
             raise SystemExit(f"can't read your GitHub login: {login}")
@@ -378,6 +417,12 @@ class Installer:
                         problem = "Anthropic refused that key (revoked, or a typo)"
                     elif accepted is None:
                         self.out("   (couldn't reach Anthropic to test it; using it as it is)")
+                    else:
+                        usable, why = key_usable(key)     # one real one-word request: a fraction of a cent
+                        if usable is False:
+                            problem = why
+                        elif usable is None:
+                            self.out("   (the key exists, but a test request couldn't be made; using it as it is)")
                 if not problem:
                     break
                 self.out(f"   {problem}")
@@ -465,8 +510,20 @@ class Installer:
             self.git("push", "-q", f"https://github.com/{repo}.git", f"HEAD:{branch}", cwd=d)
 
     # 4. the Apps
+    APP_ROLES = (("app", "The main App", "The agents act as it. It reads and writes code, tickets and pull requests in your two repos, and it can never merge."),
+                 ("notify", "The notify App", "It only wakes ORGrove up when a person opens a ticket, comments or merges."),
+                 ("read", "The read-only App", "The agents' model runs as it, so a tricked model can read your tickets but never change them."))
+
+    def app_step(self, key):
+        """Where this App sits among the three, for the page: its number, its job, and the ones already done."""
+        keys = [k for k, _, _ in self.APP_ROLES]
+        role = next(r for k, r, _ in self.APP_ROLES if k == key)
+        why = next(w for k, _, w in self.APP_ROLES if k == key)
+        return {"n": keys.index(key) + 1, "of": len(keys), "role": role, "why": why,
+                "done": [self.s[k]["slug"] for k in keys[:keys.index(key)] if k in self.s]}
+
     def apps(self):
-        self.step("GitHub Apps (two clicks each, in your browser)")
+        self.step("GitHub Apps (three, one after another; each is two clicks in your browser)")
         owner = self.s["owner"]
         if "app" not in self.s:
             self.out("  The main App: the agents act as it. It may read and write code, issues and pull requests in")
@@ -477,7 +534,7 @@ class Installer:
                 self.set_variable(self.repo, "ORGROVE_APP_ID", conv["id"])
             flow = self.app_flow(owner, app_manifest(f"{owner}-orgrove", owner, doctor.APP_PERMISSIONS,
                                                      "ORGrove's agents: plan, build and review; a person merges."),
-                                 [CONTROL, self.s["project"]], store_main, port=self.port)
+                                 [CONTROL, self.s["project"]], store_main, port=self.port, step=self.app_step("app"))
             r = flow.run(self.open_url, self.out)
             self.s["app"] = {"id": r["id"], "slug": r["slug"], "installation": r["installation"]}
             self.save()
@@ -492,11 +549,26 @@ class Installer:
                 self.set_variable(self.project_repo, "ORGROVE_CONTROL_REPO", CONTROL)
             flow = self.app_flow(owner, app_manifest(f"{owner}-orgrove-notify", owner, {"actions": "write"},
                                                      "Starts ORGrove when a person acts in a project repo."),
-                                 [CONTROL], store_notify, port=self.port)
+                                 [CONTROL], store_notify, port=self.port, step=self.app_step("notify"))
             r = flow.run(self.open_url, self.out)
             self.s["notify"] = {"id": r["id"], "slug": r["slug"], "installation": r["installation"]}
             self.save()
             self.check_reach(r, [self.repo])
+            self.out(f"  ✓ {r['slug']} created and installed")
+        if "read" not in self.s:
+            self.out("  The read-only App: the agents' model runs as it, so it can read your tickets and pull requests but")
+            self.out("  never change them. A model that is tricked into misbehaving can't write to your tracker.")
+
+            def store_read(conv):
+                self.set_secret(self.repo, "ORGROVE_READ_APP_PRIVATE_KEY", conv["pem"])
+                self.set_variable(self.repo, "ORGROVE_READ_APP_ID", conv["id"])
+            flow = self.app_flow(owner, app_manifest(f"{owner}-orgrove-read", owner, doctor.READ_APP_PERMISSIONS,
+                                                     "The agents' model runs as this App: it reads, it can't write tickets."),
+                                 [CONTROL, self.s["project"]], store_read, port=self.port, step=self.app_step("read"))
+            r = flow.run(self.open_url, self.out)
+            self.s["read"] = {"id": r["id"], "slug": r["slug"], "installation": r["installation"]}
+            self.save()
+            self.check_reach(r, [self.repo, self.project_repo])
             self.out(f"  ✓ {r['slug']} created and installed")
 
     def check_reach(self, app, wanted, attempts=20):
@@ -743,7 +815,10 @@ class Installer:
             return
         if self.yes("\nEverything is ready. Switch the agents on now?"):
             self.set_variable(self.repo, "ORGROVE_ENABLED", "true")
-            self.out("  ✓ the agents are on")
+            # Switching the agents on is no event the dispatcher wakes for: it would wait for its next scheduled run, which
+            # GitHub can leave hours apart (2026-11-10: nine hours between two). Start it now; a failure is harmless.
+            started, _ = self.gh("workflow", "run", "dispatch.yml", "-R", self.repo)
+            self.out("  ✓ the agents are on" + (" and the dispatcher is started" if started else ""))
         else:
             self.out(f"  Later: gh variable set ORGROVE_ENABLED -R {self.repo} --body true")
 
@@ -764,6 +839,16 @@ class Installer:
             subprocess.run(["security", "-i"], input=f"add-generic-password -U -s {service} -a orgrove -w {self.key}\n",
                            capture_output=True, text=True, check=False)
             self.out("  ✓ stored" if doctor.has_keychain_item(service) else "  couldn't store it; Office meetings won't start")
+
+    def monitoring_floor(self):
+        """Pro: the optional Monitoring floor (Floor 2). Asked last and defaulting to no, so the five questions stay five."""
+        if not has("monitoring"):
+            return
+        if not self.yes("\nAdd the Monitoring floor (Floor 2: watches your AWS with read-only access)? Optional, free to set up", default=False):
+            self.out("  Later: bin/orgrove-monitor-setup")
+            return
+        from orgrove import monitor_setup
+        monitor_setup.setup(ask=self.ask_raw, out=self.out)
 
     def finish(self):
         self.s["done"] = True
@@ -787,16 +872,22 @@ class Installer:
         self.check()
         self.switch_on()
         self.meeting_key()
+        self.monitoring_floor()
         self.finish()
 
 
 def main(argv=None):
     p = argparse.ArgumentParser(prog="./install", description=__doc__.split("\n")[0])
-    p.add_argument("--port", type=int, default=0, help="local port for the two GitHub App pages (default: any free "
-                   "port). Fix it when the browser is on another machine, then forward it: ssh -L 8790:127.0.0.1:8790")
+    p.add_argument("--port", type=int, default=0, help="local port of the installer page (default: any free port). "
+                   "Fix it when the browser is on another machine, then forward it: ssh -L 8790:127.0.0.1:8790")
+    p.add_argument("--cli", action="store_true", help="ask the questions in this terminal instead of in a page in your browser")
     a = p.parse_args(argv)
     try:
-        Installer(port=a.port).run()
+        if a.cli:
+            Installer(port=a.port).run()
+        else:
+            from orgrove import webinstall   # lazy: the terminal installer needs none of it
+            webinstall.run(port=a.port)
     except KeyboardInterrupt:
         print("\nStopped. Run ./install again to continue where it stopped.")
         return 130

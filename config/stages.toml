@@ -86,6 +86,12 @@ when = "review round > max_review_rounds"
 
 [[transition]]
 from = "awaiting-review"
+to = "in-dev"
+by = "dispatcher"
+when = "the open PR conflicts with main (DIRTY); +needs/fix, Dev merges main and resolves (#93)"
+
+[[transition]]
+from = "awaiting-review"
 to = "deployed-dev"
 by = "human"
 when = "PR merged; the project's deploy succeeded"
@@ -97,10 +103,22 @@ by = "dispatcher"
 when = "Dev deploy finished"
 
 [[transition]]
+from = "awaiting-review"
+to = "backlog"
+by = "pm"
+when = "its PR already merged (it said Refs, so GitHub did not close the ticket) and criteria are left: planned as the next chunk"
+
+[[transition]]
 from = "deployed-dev"
 to = "backlog"
 by = "dispatcher"
 when = "Sanity passed the deployed build but the ticket is still open (it ships in chunks): back to the PM"
+
+[[transition]]
+from = "deployed-dev"
+to = "in-dev"
+by = "dispatcher"
+when = "Sanity's newest verdict on the deployed build is a fail and it raised a linked bug: back to Dev with needs/fix"
 
 [[transition]]
 from = "sanity"
@@ -119,9 +137,11 @@ when = "failed; a linked bug was raised"
 "needs/plan"     = "PM should plan this issue"
 "needs/roadmap"  = "PM should run the roadmap pass (dates for every open issue)"
 "needs/fix"      = "review or sanity raised blocking sub-issues"
-"needs/human"    = "ORGrove Review: a human decision, approval or budget is needed"
+"needs/human"    = "ORGrove Review: a human decision, approval or budget is needed (asked by the Delivery Lead)"
+"needs/delivery" = "a question for the owner: the Delivery Lead checks it, settles it with the agents or asks the owner plainly"
 "needs/approval" = "held for the owner: agents ignore it until the owner approves (removes this label)"
 "blocked/budget" = "the budget gate refused a run"
+"blocked/parked" = "the owner parked it for later: agents leave it alone and it isn't waiting on anyone; remove the label to bring it back"
 "blocked/deps"   = "waits for the tickets named in its <!-- orgrove:after #n --> marker; the dispatcher releases it"
 "agent/pm"       = "a PM run is active on this issue"
 "agent/dev"      = "a Dev run is active on this issue"
@@ -129,6 +149,7 @@ when = "failed; a linked bug was raised"
 "agent/security" = "a Security run is active on this issue"
 "agent/devops"   = "a DevOps run is active on this issue"
 "agent/sanity"   = "a Sanity run is active on this issue"
+"agent/delivery" = "a Delivery Lead run is active on this issue"
 
 # The other labels ORGrove writes, by repo (#159: a client install had none of them, so drafted tickets
 # and the hand-off of a failed deploy to DevOps were refused). init and sync_labels create them, doctor
@@ -138,9 +159,14 @@ when = "failed; a linked bug was raised"
 "priority/p1" = "This week"
 "priority/p2" = "Soon"
 "priority/p3" = "Some day"
+"type/bug"      = "Defect: its agent cost is counted as bug fixing"
+"type/feature"  = "New feature: its agent cost is counted as feature work"
+"type/refactor" = "Refactor: its agent cost is counted as refactoring"
+"type/infra"    = "Infra / CI / deploy: its agent cost is counted as infra work"
 "type/docs"   = "Documentation, minutes and other records"
 "area/infra"  = "Infrastructure: a failed deploy goes back to DevOps"
 "stage/done"  = "Closed: ORGrove is finished with this ticket"
+"skip-agent-review" = "The owner opts this pull request out of agent QA and Security review"
 
 [labels.control]
 "needs/human"    = "A human decision is needed (for example, the retro's lessons PR couldn't open)"

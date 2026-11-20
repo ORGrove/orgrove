@@ -5,9 +5,10 @@
 export const SLOT_MS = 20 * 60000;                      // a table-tennis game
 export const hashStr = (t) => [...t].reduce((h, c) => (h * 33 + c.charCodeAt(0)) >>> 0, 5381);
 
-// Table tennis (#121): role + 20-minute slot picks who plays, the same answer for every viewer and every reload.
-// A game is the one thing that runs the whole slot, and never with a lone player.
-function tableTennis(roles, spots, now) {
+// The games (#121: table tennis; 2026-11-03: foosball): role + 20-minute slot picks who plays, the same answer for
+// every viewer and every reload. A game is the one thing that runs the whole slot, and never with a lone player.
+// Returns spot name -> the players.
+function games(roles, spots, now) {
   const slot = Math.floor(now / SLOT_MS), used = new Map(), out = new Map();
   for (const role of roles) {
     let i = hashStr(role + slot) % spots.length;
@@ -16,14 +17,18 @@ function tableTennis(roles, spots, now) {
       if (n < spots[i].places.length) { used.set(i, n + 1); out.set(role, i); break; }
     }
   }
-  const tt = spots.findIndex((s) => s.min);
-  if (tt < 0) return [];
-  const at = roles.filter((r) => out.get(r) === tt);
-  if (at.length === 1) {                                   // pull a partner over, else nobody plays alone
-    const partner = roles.find((r) => out.get(r) !== tt);
-    return partner ? [at[0], partner] : [];
-  }
-  return at.slice(0, spots[tt].places.length);
+  const playing = new Map(), busy = new Set();
+  spots.forEach((s, g) => {
+    if (!s.min) return;
+    const at = roles.filter((r) => out.get(r) === g).slice(0, s.places.length);
+    if (at.length === 1) {                                 // pull a partner over, else nobody plays alone
+      const partner = roles.find((r) => !spots[out.get(r)]?.min && !busy.has(r));
+      if (!partner) return;
+      at.push(partner);
+    }
+    if (at.length >= s.min) { at.forEach((r) => busy.add(r)); playing.set(s.name, at); }
+  });
+  return playing;
 }
 
 // Everything else on a break (owner, 2026-10-30: "not normal human will do" 20 minutes at a window): a few
@@ -64,8 +69,8 @@ export function breakPlaces(roles, spots, now = Date.now(), own = []) {
     used.set(spot.name, n + 1); out.set(role, { spot, place: spot.places[n], index: n });
     return true;
   };
-  const tt = spots.find((s) => s.min);
-  for (const role of tableTennis(roles, spots, now)) take(role, tt);
+  const byGame = games(roles, spots, now);
+  for (const [name, players] of byGame) for (const role of players) take(role, byName.get(name));
   for (const role of [...roles, ...own]) {
     if (out.has(role)) continue;
     const { act } = activityAt(role, now, own.includes(role));
@@ -74,6 +79,14 @@ export function breakPlaces(roles, spots, now = Date.now(), own = []) {
     order.some((name) => byName.has(name) && take(role, byName.get(name)));
   }
   return out;
+}
+
+// Where a meeting sits (owner, 2026-11-03): one or two people with the CTO talk at the round table in the CTO's
+// cabin; more than that (a meeting type's guest list, or a third person tagged in) take the meeting room.
+export const CABIN_MAX = 2;
+export function meetingRoom(mtg) {
+  if (!mtg?.active) return null;
+  return new Set((mtg.participants || []).map((x) => mtg.characters[x])).size <= CABIN_MAX ? "cabin" : "meeting";
 }
 
 // Meeting seats (#102): seat 0 is the CTO's, facing the agenda; the others in the order they were invited.
@@ -87,9 +100,11 @@ export function seatOf(character, mtg) {
 
 // Everyone's place. `layout` gives the look's break spots, how many lounge seats it has and, optionally, who is
 // always in the office though not in the roster (`always`: the CTO, and Finance in ORGrove Pro).
-// A place is { where: "meeting" | "desk" | "break" | "lounge" | "home", index, spot, place }.
+// A place is { where: "meeting" | "desk" | "break" | "lounge" | "home", index, spot, place }; a meeting place also
+// says which room the meeting is in (room: "cabin" | "meeting"); a home place says free: true when it is a drop-by
+// with nothing to do (the new look sits the CTO on the cabin sofa then; at work, always the desk chair).
 export function placements(s, mtg, layout, now = Date.now()) {
-  const roster = s.roster || [];
+  const roster = s.roster || [], room = meetingRoom(mtg);
   const resting = roster.filter((r) => r.status !== "working" && seatOf(r.role, mtg) < 0);
   // The CTO works while something waits on them (the inbox); Finance has no queue of its own. Free, they take
   // breaks like everyone else and drop by their own cabin now and then (owner, 2026-10-30).
@@ -101,7 +116,7 @@ export function placements(s, mtg, layout, now = Date.now()) {
   for (const row of roster) {
     const seat = seatOf(row.role, mtg), working = row.status === "working", task = row.on?.[0];
     let p;
-    if (seat >= 0 && !working) p = { where: "meeting", index: seat };          // invited and free: walks to the meeting room
+    if (seat >= 0 && !working) p = { where: "meeting", index: seat, room };    // invited and free: walks to the meeting
     else if (working) p = { where: "desk" };          // QA and Security review at their own desks too (no review room)
     else if (brk.get(row.role)?.spot) { const b = brk.get(row.role); p = { where: "break", spot: b.spot.name, index: b.index, place: b.place }; }
     else p = { where: "lounge", index: lounge++ % layout.loungeSeats };
@@ -110,10 +125,10 @@ export function placements(s, mtg, layout, now = Date.now()) {
   }
   for (const who of always) {                                                     // not in the roster: always present
     const seat = seatOf(who, mtg), b = brk.get(who);
-    at.set(who, seat >= 0 ? { where: "meeting", index: seat, seat }
+    at.set(who, seat >= 0 ? { where: "meeting", index: seat, seat, room }
       : b?.spot ? { where: "break", spot: b.spot.name, index: b.index, place: b.place, seat, breakSpot: b.spot.name }
-      : { where: "home", seat });
+      : { where: "home", seat, ...(b?.cabin && { free: true }) });                // free: dropping by their cabin, no work
   }
-  return { at, resting: resting.length,
-           pingpong: [...brk].filter(([, b]) => b.spot?.name === "table tennis").map(([role]) => role) };
+  const playing = (game) => [...brk].filter(([, b]) => b.spot?.name === game).map(([role]) => role);
+  return { at, resting: resting.length, pingpong: playing("table tennis"), foosball: playing("foosball"), room };
 }

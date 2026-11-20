@@ -35,7 +35,7 @@ same defect (every cloud call, every endpoint, every query the change adds), and
 sub-issue per class that lists each file and line. Finding the second instance next round costs a Dev run and both
 reviews again. On 2026-10-27, #43 took three rounds for one class of bug.
 
-Each **blocking** finding becomes a sub-issue: the title, file and line, the attack or failure scenario in one sentence, and the fix. Then post the verdict (`skills/VERDICT.md`, `role: "security"`).
+Each **blocking** finding becomes a sub-issue: send it in `sub_items` (the title, and a body with the file and line, the attack or failure scenario in one sentence, and the fix), and give its finding in the verdict `sub_item` with its place in that list, counting from 0. Then post the verdict (`skills/VERDICT.md`, `role: "security"`).
 
 Blocking means exploitable, or a weakened control, or a dishonest claim. Defence-in-depth suggestions are non-blocking.
 

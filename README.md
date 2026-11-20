@@ -23,14 +23,28 @@ cd orgrove
 (Or download the ZIP from GitHub, unpack it, and run `./install` in that folder.) Your install goes to a new
 `orgrove` repo in your organisation; the copy you cloned stays linked as `upstream`, for updates.
 
-On a computer without a browser (a server you reach over SSH), fix the port of the two GitHub App pages and forward
+`./install` opens a page in your browser and everything happens there. Prefer the terminal? `./install --cli`.
+
+On a computer without a browser (a server you reach over SSH), fix the port of the installer page and forward
 it: `ssh -L 8790:127.0.0.1:8790 you@server`, then `./install --port 8790` on the server, and open the address it
 prints in your own browser.
 
 It asks five things (your organisation, the API key, the project, your spend caps, who may give the agents work)
-and does the rest: the repos, both GitHub Apps (you click Create and Install on GitHub's own pages), the secrets,
+and does the rest: the repos, the three GitHub Apps (you click Create and Install on GitHub's own pages), the secrets,
 the configuration and the checks. If it stops, run it again: it continues where it stopped. **INSTALL.md**
 explains what it needs, what it costs and how to fix problems, and lists every step by hand for IT teams.
+
+## Using ORGrove
+
+1. **Open an issue** in your project repo, as one of the people you named during the install, saying what you
+   want and how you will know it works.
+2. **Watch it move.** The PM plans it in a comment, Dev builds it, QA and Security review it. Its label shows
+   the stage, and `bin/orgrove-office` shows the whole team live. If an agent needs a decision, the issue is
+   labelled `needs/human`: answer in a comment.
+3. **Merge the pull request** when it arrives. Only a person merges.
+
+**GUIDE.md** explains each step: how to write a good issue, what every label means, where to watch, how to hold
+or stop the agents, and what a ticket costs.
 
 ## Author
 

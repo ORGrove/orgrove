@@ -1,0 +1,33 @@
+# ORGrove: copy into each project repo as .github/ISSUE_TEMPLATE/new-work.yml (GUIDE.md, section 1).
+# GitHub then offers a "New work" form, so every ticket reaches the PM agent in the shape it plans best.
+name: New work
+description: Something for the ORGrove team to build or fix. One change per issue.
+body:
+  - type: textarea
+    id: what
+    attributes:
+      label: What you want
+      description: In a sentence or two, from the user's side.
+      placeholder: On the orders page, a "Download CSV" button saves the orders currently shown as a CSV file.
+    validations:
+      required: true
+  - type: textarea
+    id: why
+    attributes:
+      label: Why
+      description: Who it is for, and what they do today. It helps the PM choose between two ways of doing it.
+      placeholder: For the accounts team, who copy the table by hand today.
+  - type: textarea
+    id: done
+    attributes:
+      label: Done when
+      description: What you would click, run or see to know it works.
+      placeholder: With a filter applied, the file has exactly the rows on screen and opens in a spreadsheet.
+    validations:
+      required: true
+  - type: textarea
+    id: avoid
+    attributes:
+      label: Must not change
+      description: Files, pages or APIs other people rely on. Leave it empty if there are none.
+      placeholder: The orders API, which the mobile app uses.

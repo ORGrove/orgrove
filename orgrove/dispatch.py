@@ -21,15 +21,16 @@ import re
 import subprocess
 import sys
 from collections import Counter
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
 
 import os
 
-from orgrove import budget, ci, freetime, gate, manifest, office, org, stages, sync_labels, verdict
+from orgrove import budget, ci, executor, freetime, gate, manifest, office, org, outbox, prreview, stages, standup, sync_labels, update_branch, verdict
+from orgrove.actions import BoardStatus, CloseItem, Dispatch, OpenPR, Skip, as_dict, label_edit
 
 PRIORITY = {"p0": 0, "p1": 1, "p2": 2, "p3": 3}
-HOLD = {"needs/human", "blocked/budget", "needs/approval", "blocked/deps"}  # meeting drafts wait for the owner (#45)
+HOLD = {"needs/human", "blocked/budget", "needs/approval", "blocked/deps", "needs/delivery", "blocked/parked"}  # meeting drafts wait for the owner (#45)
 # A ticket that builds on other open tickets waits under blocked/deps, with this marker in its body naming them.
 # The dispatcher releases it once they have all landed. It is not the owner's question (2026-10-30: #34-#36).
 AFTER = re.compile(r"<!--\s*orgrove:after\s+([#\d ,]+?)\s*-->")
@@ -42,10 +43,29 @@ DEPLOY_POLL_MIN = 1         # a merge's deploy: the next tick is booked for when
                             # runs' median length), then every minute past that; none at all with an install's own timer
 DEPLOY_FAILED = "orgrove:deploy-failed"   # marker in the dispatcher's comment: one DevOps round per ticket
 # The dispatcher's own "→ labels +[...needs/human...]" comment: an owner reply after it answers a hold.
-HELD = re.compile(r"ORGrove dispatcher: .*→ labels \+\[[^\]]*needs/human", re.I)   # either spelling of the name (before 2026-10-29 too)
+DELIVERY_TRIES = 2   # Delivery Lead runs on one issue in a day before a hold goes straight to the owner
+LOOP_RUNS = 6        # paid runs of one role on one ticket in a local day; then that role stops on it until tomorrow (L-018)
+OUTBOX_REFUSED_MAX = 2   # paid runs of one role on one ticket whose results were refused, one after another; the next is not paid
+REVIEW_LOOP_RUNS = 4   # reviewers: max_review_rounds (3) plus the one more try an owner can grant
+# Paid reviews by one reviewer (QA, Security) on one ticket in the month's ledger; a further review goes to the
+# Delivery Lead (needs/delivery), and after an owner's or the Delivery Lead's answer one more is allowed (L-019,
+# owner decision 2026-11-05: $18 of $67 in five days went on third and later reviews of the same ticket).
+REVIEW_PAID_MAX = 2
+REVIEWERS = ("qa", "security")
+
+
+def loop_cap(role):
+    return REVIEW_LOOP_RUNS if role in ("qa", "security", "sanity") else LOOP_RUNS
+PLAN_TRIES = 2       # PM runs on one needs/plan issue in a day before it waits in the backlog for Dev's room
+HELD = re.compile(r"ORGrove dispatcher: .*→ labels \+\[[^\]]*needs/(?:human|delivery)", re.I)   # either spelling of the name (before 2026-10-29 too)
 # After the AI provider refuses a run (usage limit, bad key), nobody starts for this long; then one tick tries again.
 # On 2026-10-28 a workspace limit refused every run for hours while the status said "on break".
 REFUSAL_PAUSE_MIN = 30
+# A refusal that names when access returns ("You will regain access on 2026-12-01 at 00:00 UTC", a workspace's monthly
+# limit) pauses until then, but tries once every REFUSAL_PROBE_H in case the owner raised the limit. 2026-11-05/06:
+# the 30-minute pause started four refused runs every hour (55 in 16 h) for a limit that ends on the 1st.
+REFUSAL_PROBE_H = 12
+REGAIN = re.compile(r"regain access on (\d{4}-\d{2}-\d{2}) at (\d{2}:\d{2}) UTC")
 # GitHub's 10-minute schedule ran only every few hours on 2026-10-28, and never in a new organisation's first hours
 # (#159 sandbox), so the dispatcher books its own next tick (wake.yml) whenever something will need one and no
 # running agent will start it. A wake-up sleeps on a runner, and sleeping is billed: every reason is bounded.
@@ -80,12 +100,12 @@ def board_sync(cfg, cards, board, open_numbers, status_map=None):
     for c in cards:
         want = "Done" if c["stage"] == "done" else mirror.get(c["stage"])
         if want and c.get("on_board") and c.get("board_status") != to_board(want):
-            actions.append({"kind": "board", "issue": c["number"], "item_id": board[c["number"]]["item_id"],
-                            "status": to_board(want), "why": f"stage {c['stage']}"})
+            actions.append(BoardStatus(issue=c["number"], item_id=board[c["number"]]["item_id"],
+                            status=to_board(want), why=f"stage {c['stage']}"))
     for n, b in board.items():
-        if n not in open_numbers and b["status"] != to_board("Done") and not any(a["issue"] == n for a in actions):
-            actions.append({"kind": "board", "issue": n, "item_id": b["item_id"], "status": to_board("Done"),
-                            "why": "issue is closed"})
+        if n not in open_numbers and b["status"] != to_board("Done") and not any(a.issue == n for a in actions):
+            actions.append(BoardStatus(issue=n, item_id=b["item_id"], status=to_board("Done"),
+                            why="issue is closed"))
     return actions
 
 
@@ -100,12 +120,13 @@ def on_break_long_enough(row, now):
 
 def decide(dept, cfg, cards, roster_rows, review, merged, backlog, now, spent_today, daily_cap,
            focus=None, roadmap_request=None, has_env=True, answered=(), explain=None, budget_kind="daily", deploys=None,
-           sanity_passed=(), refused=None, awaiting_ci=None, deps=None, project=None):
+           sanity_passed=(), sanity_failed=(), outbox_stuck=None, refused=None, awaiting_ci=None, deps=None, project=None, unvetted=(), delivery_tries=None, plan_tries=None,
+           use="", pm_seen=None, pm_touched=(), paid_runs=None, review_paid=None, external_prs=False, pr_reviews=()):
     """Pure decision step. Returns a list of actions; see module docstring.
 
     review:  issue -> {"head", "verdicts": {role: verdict}, "rounds": {role: n}, "open_subs": [..],
                        "ci": green|red|pending|none, "ci_failing": [(name, url)], "ci_bounces": n, "ci_kicks": n,
-                       "head_age_min": m, "granted": bool}
+                       "head_age_min": m, "granted": bool, "since": iso time of that answer or None}
              Counts restart when an owner answers a hold, and "granted" then allows one more try.
              A missing "ci" means green (callers that predate #151).
     merged:  set of issue numbers whose agent PR has been merged
@@ -114,9 +135,34 @@ def decide(dept, cfg, cards, roster_rows, review, merged, backlog, now, spent_to
     roadmap_request: issue number of the roadmap issue when it carries needs/roadmap
     has_env: False for projects with no deploy environment; a merged PR then closes the ticket
     answered: held (needs/human) issues whose newest comment is an owner's reply
+    plan_tries: issue -> PM runs on it today. At PLAN_TRIES a needs/plan ticket in the backlog loses the label and
+             waits for Dev's room (2026-11-02: the PM re-checked #316 four times in six minutes with Dev's queue full).
+    pm_seen: issue -> when its last settled PM run ended (pm_last_runs). A needs/plan ticket the PM already ran on and
+             that is not in pm_touched is not given to the PM again; a first plan (never run), an owner reply and the
+             roadmap batch always start one, and a backlog ticket is still planned when Dev has room (#77).
+    pm_touched: issues that changed for the PM since its last run (pm_changes: an owner or agent comment; the
+             dispatcher's own label notes and other people's comments don't count)
+    external_prs: the project's [review] external_prs switch. Off: pr_reviews is not read at all (#82)
+    pr_reviews: open PRs with {"number", "author", "head", "labels", "verdicts": {role: verdict}} (prreview.reviews_needed).
+             With the switch on, QA and Security are queued (mode "pr") for each PR that no [bot] opened, that has no
+             skip-agent-review label and whose current head has no verdict from that role; tickets come first
+    paid_runs: (issue, role) -> runs that reached the model today. At loop_cap(role) that role is not started on that
+             ticket again until tomorrow, whatever the cause: a loop is stopped by its cost, not by knowing its bug
+             (L-018; 2026-11-03: QA and Security approved #667's head 61 times, $7.52, because of L-017).
+    review_paid: (issue, reviewer) -> settle times of its paid runs this month (review_paid()). A reviewer with
+             REVIEW_PAID_MAX of them since the last answered hold (1 after an answer) is not started again: the
+             ticket goes to the Delivery Lead, whatever the verdicts say (L-019).
+    use: the project's spend line (standup.use_line) for the note on a stalled ticket (orgrove.standup)
+    delivery_tries: issue -> Delivery Lead runs on it today. At DELIVERY_TRIES a hold goes straight to the owner, so
+             the Delivery Lead and a rule that keeps re-raising the hold can't loop.
+    unvetted: needs/human issues with no Delivery Lead question since the owner last spoke: they go to the Delivery
+             Lead first (needs/delivery), whoever added the label (2026-11-02, owner decision)
     explain: optional list; gets one status per roster role saying what it does or why it is idle (#98)
     budget_kind: which cap `daily_cap` really is today ("daily" or "monthly"), for the explanation
     sanity_passed: deployed-dev issues Sanity has passed since they were deployed, but that are still open
+    sanity_failed: deployed-dev issues whose newest Sanity verdict since the deploy is a fail: back to Dev
+    outbox_stuck: (issue, role) -> the reasons its last OUTBOX_REFUSED_MAX results were refused (outbox_refusals). Not started
+             again; the ticket goes once to the Delivery Lead, in plain words (L-021)
     refused: the AI provider's refusal of the latest run, while it is recent; nobody is started
     awaiting_ci: awaiting-review issues with an open agent PR -> {"head", "ci", "ci_failing", "ci_bounces", "url"}.
              main moves after the reviews, so a PR can turn red while it waits for the owner; it goes back to Dev.
@@ -125,27 +171,52 @@ def decide(dept, cfg, cards, roster_rows, review, merged, backlog, now, spent_to
              the role's skill, so two roles with one skill (the two PMs) each serve their own project.
     """
     actions = []
+    tries = delivery_tries or {}
+
+    def hold(n):
+        return "needs/human" if tries.get(n, 0) >= DELIVERY_TRIES else "needs/delivery"
+
+    for c in cards:
+        if "needs/delivery" in c["flags"] and tries.get(c["number"], 0) >= DELIVERY_TRIES and c["stage"] != "done":
+            actions.append(label_edit(issue=c["number"], remove=["needs/delivery"], add=["needs/human"],
+                            why=f"the Delivery Lead has looked at it {tries[c['number']]} times today without settling it",
+                            note="Its notes are in the comments above."))
+            c["flags"] = [f for f in c["flags"] if f != "needs/delivery"] + ["needs/human"]
+    for c in cards:
+        if ("needs/plan" in c["flags"] and c["stage"] == "backlog" and c["number"] not in answered
+                and (plan_tries or {}).get(c["number"], 0) >= PLAN_TRIES):
+            actions.append(label_edit(issue=c["number"], remove=["needs/plan"], add=[],
+                            why=f"the PM has looked at it {plan_tries[c['number']]} times today",
+                            note="It stays in the backlog; the dispatcher asks the PM again when Dev has room."))
+            c["flags"] = [f for f in c["flags"] if f != "needs/plan"]
     # GitHub closes a ticket when its PR says "Closes #n", and people close tickets too: whatever closed it, a
     # closed ticket's stage label becomes stage/done, quietly (no comment on a closed ticket).
     live = {s.get("label", f"stage/{s['id']}") for s in cfg["stage"]}   # replay fixtures keep only the id
     for c in cards:
         if c["stage"] == "done" and (stale := sorted(live & set(c["labels"]))):
-            actions.append({"kind": "label", "issue": c["number"], "remove": stale, "add": [stages.DONE_LABEL],
-                            "why": "closed", "quiet": True})
+            actions.append(label_edit(issue=c["number"], remove=stale, add=[stages.DONE_LABEL],
+                            why="closed", quiet=True))
     for c in cards:
         if "blocked/deps" in c["flags"] and (deps or {}).get(c["number"]) == []:
-            actions.append({"kind": "label", "issue": c["number"], "remove": ["blocked/deps"], "add": [],
-                            "why": "every ticket it waits for has landed",
-                            "note": f"Released: the tickets this one builds on are merged. It continues from stage {c['stage']}."})
+            actions.append(label_edit(issue=c["number"], remove=["blocked/deps"], add=[],
+                            why="every ticket it waits for has landed",
+                            note=f"Released: the tickets this one builds on are merged. It continues from stage {c['stage']}."))
             c["flags"] = [f for f in c["flags"] if f != "blocked/deps"]
     for c in cards:
         if c["number"] in answered and "needs/human" in c["flags"]:
             back_to_pm = c["stage"] == "backlog"
-            actions.append({"kind": "label", "issue": c["number"], "remove": ["needs/human"],
-                            "add": ["needs/plan"] if back_to_pm and "needs/plan" not in c["flags"] else [],
-                            "why": "the owner replied; " + ("back to the PM to re-plan with the answer" if back_to_pm
-                                                            else f"back to stage {c['stage']}")})
+            actions.append(label_edit(issue=c["number"], remove=["needs/human"],
+                            add=["needs/plan"] if back_to_pm and "needs/plan" not in c["flags"] else [],
+                            why="the owner replied; " + ("back to the PM to re-plan with the answer" if back_to_pm
+                                                            else f"back to stage {c['stage']}")))
             c["flags"] = [f for f in c["flags"] if f != "needs/human"] + (["needs/plan"] if back_to_pm else [])
+    for c in cards:
+        if (c["number"] in unvetted and c["number"] not in answered and "needs/human" in c["flags"] and c["stage"] != "done"
+                and hold(c["number"]) == "needs/delivery"):
+            actions.append(label_edit(issue=c["number"], remove=["needs/human"], add=["needs/delivery"],
+                            why="a question for the owner goes to the Delivery Lead first, who settles it with the "
+                                   "agents or asks the owner plainly"))
+            c["flags"] = [f for f in c["flags"] if f != "needs/human"] + ["needs/delivery"]
     active = [c for c in cards if c["stage"] != "done" and not HOLD & set(c["flags"])]
     max_rounds = cfg["max_review_rounds"]
     infra = lambda c: "area/infra" in c["labels"]  # noqa: E731
@@ -158,55 +229,62 @@ def decide(dept, cfg, cards, roster_rows, review, merged, backlog, now, spent_to
                 # merge commit; a failed deploy goes to DevOps once, then to the owner (#159).
                 d = (deploys or {}).get(n) or {"state": "none", "age_min": 0}
                 if d["state"] == "success":
-                    actions.append({"kind": "label", "issue": n, "remove": ["stage/awaiting-review"],
-                                    "add": ["stage/deployed-dev"], "why": f"PR merged by a human and deployed ({d['url']})"})
+                    actions.append(label_edit(issue=n, remove=["stage/awaiting-review"],
+                                    add=["stage/deployed-dev"], why=f"PR merged by a human and deployed ({d['url']})"))
                     c["stage"] = "deployed-dev"
                 elif d["state"] == "failure" and d.get("failures", 0) >= 1:
-                    actions.append({"kind": "label", "issue": n, "remove": [], "add": ["needs/human"],
-                                    "why": f"the deploy failed again after DevOps's fix ({d['url']})"})
+                    actions.append(label_edit(issue=n, remove=[], add=[hold(n)],
+                                    why=f"the deploy failed again after DevOps's fix ({d['url']})"))
                     c["stage"] = "handled"
                 elif d["state"] == "failure":
-                    actions.append({"kind": "label", "issue": n, "remove": ["stage/awaiting-review"],
-                                    "add": ["stage/in-dev", "needs/fix", "area/infra"],
-                                    "why": "the deploy of the merge failed",
-                                    "note": f"Deploy run: {d['url']}\n\nDevOps: follow **On `deploy:failed`** in your skill: "
+                    actions.append(label_edit(issue=n, remove=["stage/awaiting-review"],
+                                    add=["stage/in-dev", "needs/fix", "area/infra"],
+                                    why="the deploy of the merge failed",
+                                    note=f"Deploy run: {d['url']}\n\nDevOps: follow **On `deploy:failed`** in your skill: "
                                             "read the failed job's log, classify the cause, and fix it in code on a new "
-                                            f"agent branch if it is a code cause; otherwise `needs/human`.\n<!-- {DEPLOY_FAILED} -->"})
+                                            f"agent branch if it is a code cause; otherwise `needs/delivery`.\n<!-- {DEPLOY_FAILED} -->"))
                     c["stage"] = "handled"
                 elif d["state"] == "none" and d["age_min"] >= NO_DEPLOY_MIN:
-                    actions.append({"kind": "close", "issue": n,
-                                    "why": f"PR merged by a human; the deploy workflow didn't run for this change in "
+                    actions.append(CloseItem(issue=n,
+                                    why=f"PR merged by a human; the deploy workflow didn't run for this change in "
                                            f"{NO_DEPLOY_MIN} min (its path filters leave it out), so there is nothing "
-                                           "for Sanity to check"})
+                                           "for Sanity to check"))
                     c["stage"] = "handled"
                 else:
                     c["stage"] = "handled"   # the deploy is running or about to: the next tick looks again
             else:
-                actions.append({"kind": "close", "issue": n,
-                                "why": "PR merged by a human; this project has no deploy environment to check"})
+                actions.append(CloseItem(issue=n,
+                                why="PR merged by a human; this project has no deploy environment to check"))
                 c["stage"] = "handled"
         elif c["stage"] == "awaiting-review" and (awaiting_ci or {}).get(n, {}).get("ci") == "red":
             # The PR was green when the gate opened it, but main has moved since: the owner can't merge a red PR,
             # so it isn't theirs to look at (2026-10-30: #31's PR sat red in "waiting on you").
             a = awaiting_ci[n]
             if a.get("ci_bounces", 0) >= max_rounds:
-                actions.append({"kind": "label", "issue": n, "remove": [], "add": ["needs/human"],
-                                "why": f"its PR is red again after {a['ci_bounces']} CI round(s)"})
+                actions.append(label_edit(issue=n, remove=[], add=[hold(n)],
+                                why=f"its PR is red again after {a['ci_bounces']} CI round(s)"))
             else:
                 checks = "\n".join(f"- {name}: {url}" for name, url in a.get("ci_failing", [])) or "- (no names)"
-                actions.append({"kind": "label", "issue": n, "remove": ["stage/awaiting-review"],
-                                "add": ["stage/in-dev", "needs/fix"], "why": "its open PR went red after the reviews",
-                                "note": f"PR {a.get('url', '')} is red on `{a['head']}` (CI runs on the PR merged with "
+                actions.append(label_edit(issue=n, remove=["stage/awaiting-review"],
+                                add=["stage/in-dev", "needs/fix"], why="its open PR went red after the reviews",
+                                note=f"PR {a.get('url', '')} is red on `{a['head']}` (CI runs on the PR merged with "
                                         f"current main):\n{checks}\n\nDev: merge `origin/main` into the branch, fix the "
                                         "cause (not the test), run `commands.contract`, push. The PR updates itself."
-                                        f"\n<!-- {CI_RED} head={a['head']} -->"})
+                                        f"\n<!-- {CI_RED} head={a['head']} -->"))
             c["stage"] = "handled"
         elif c["stage"] == "deployed-dev" and n in sanity_passed:
             # Sanity passed but left the ticket open, as it should for a long-running ticket that ships in chunks.
             # Left at deployed-dev, Sanity re-checked the same build every break (#43: 6 rounds on 2026-10-28).
-            actions.append({"kind": "label", "issue": n, "remove": ["stage/deployed-dev"], "add": ["needs/plan"],
-                            "why": "Sanity passed the deployed build and the ticket is still open",
-                            "note": "PM: plan the next chunk, or close the ticket if nothing is left."})
+            actions.append(label_edit(issue=n, remove=["stage/deployed-dev"], add=["needs/plan"],
+                            why="Sanity passed the deployed build and the ticket is still open",
+                            note="PM: plan the next chunk, or close the ticket if nothing is left."))
+            c["stage"] = "handled"
+        elif c["stage"] == "deployed-dev" and n in sanity_failed:
+            # Sanity is a reviewer: it judges and raises the linked bug, the dispatcher moves the ticket (L-021).
+            actions.append(label_edit(issue=n, remove=["stage/deployed-dev"], add=["stage/in-dev", "needs/fix"],
+                            why="Sanity failed the deployed build",
+                            note="Dev: Sanity's verdict and its linked bug say what failed on the deployed build. "
+                                 "Fix it on the ticket's branch, close the linked sub-issue, and send it back to review."))
             c["stage"] = "handled"
         elif c["stage"] == "agent-review" and n in review:
             r = review[n]
@@ -215,49 +293,83 @@ def decide(dept, cfg, cards, roster_rows, review, merged, backlog, now, spent_to
             if state == "red":
                 # Nobody reviews a head CI has already failed: it goes straight back to Dev (#151).
                 if r.get("ci_bounces", 0) >= limit:
-                    actions.append({"kind": "label", "issue": n, "remove": [], "add": ["needs/human"],
-                                    "why": f"CI still red after {r.get('ci_bounces', 0)} round(s)"})
+                    actions.append(label_edit(issue=n, remove=[], add=[hold(n)],
+                                    why=f"CI still red after {r.get('ci_bounces', 0)} round(s)"))
                 else:
                     checks = "\n".join(f"- {name}: {url}" for name, url in r.get("ci_failing", [])) or "- (no names)"
-                    actions.append({"kind": "label", "issue": n, "remove": ["stage/agent-review"],
-                                    "add": ["stage/in-dev", "needs/fix"], "why": "CI is red on the head; no review until it is green",
-                                    "note": f"Failing checks on `{r['head']}`:\n{checks}\n\nDev: read the failing job log, fix the cause "
-                                            f"(not the test), run `commands.contract`, push.\n<!-- {CI_RED} head={r['head']} -->"})
+                    actions.append(label_edit(issue=n, remove=["stage/agent-review"],
+                                    add=["stage/in-dev", "needs/fix"], why="CI is red on the head; no review until it is green",
+                                    note=f"Failing checks on `{r['head']}`:\n{checks}\n\nDev: read the failing job log, fix the cause "
+                                            f"(not the test), run `commands.contract`, push.\n<!-- {CI_RED} head={r['head']} -->"))
                 c["stage"] = "handled"
                 continue
             if state == "none" and r.get("head_age_min", 0) >= NO_CI_MIN:
                 # Usually a branch cut before Agent CI existed: a push runs the workflows IN the pushed commit,
                 # so it has none to run (#599, 2026-10-28). Dev brings main in once; only then is it the owner's.
                 if r.get("ci_kicks", 0) >= 1:
-                    actions.append({"kind": "label", "issue": n, "remove": [], "add": ["needs/human"],
-                                    "why": f"still no CI result {NO_CI_MIN} min after Dev brought main into the branch"})
+                    actions.append(label_edit(issue=n, remove=[], add=[hold(n)],
+                                    why=f"still no CI result {NO_CI_MIN} min after Dev brought main into the branch"))
                 else:
-                    actions.append({"kind": "label", "issue": n, "remove": ["stage/agent-review"],
-                                    "add": ["stage/in-dev", "needs/fix"],
-                                    "why": f"no CI result on the head after {NO_CI_MIN} min; reviews wait for CI",
-                                    "note": f"`{r['head']}` has no CI run. A push runs the workflows in the pushed commit, so "
+                    actions.append(label_edit(issue=n, remove=["stage/agent-review"],
+                                    add=["stage/in-dev", "needs/fix"],
+                                    why=f"no CI result on the head after {NO_CI_MIN} min; reviews wait for CI",
+                                    note=f"`{r['head']}` has no CI run. A push runs the workflows in the pushed commit, so "
                                             "a branch cut before Agent CI existed has none. Dev: merge `origin/main` into "
                                             "the branch (a merge commit, no other change), run `commands.contract`, push."
-                                            f"\n<!-- {CI_NONE} head={r['head']} -->"})
+                                            f"\n<!-- {CI_NONE} head={r['head']} -->"))
                 c["stage"] = "handled"
                 continue
             changes = [role for role, v in r["verdicts"].items() if v["decision"] == "changes"]
             if changes:
                 if any(r["rounds"].get(role, 0) >= limit for role in changes):
-                    actions.append({"kind": "label", "issue": n, "remove": [], "add": ["needs/human"],
-                                    "why": f"still failing review after {max(r['rounds'].get(x, 0) for x in changes)} rounds"})
+                    actions.append(label_edit(issue=n, remove=[], add=[hold(n)],
+                                    why=f"still failing review after {max(r['rounds'].get(x, 0) for x in changes)} rounds"))
                 else:
-                    actions.append({"kind": "label", "issue": n, "remove": ["stage/agent-review"],
-                                    "add": ["stage/in-dev", "needs/fix"], "why": f"{', '.join(changes)} asked for changes"})
+                    actions.append(label_edit(issue=n, remove=["stage/agent-review"],
+                                    add=["stage/in-dev", "needs/fix"], why=f"{', '.join(changes)} asked for changes"))
+                c["stage"] = "handled"
+            elif over := reviews_over(n, r, review_paid):
+                actions.append(label_edit(issue=n, remove=[], add=[hold(n)],
+                                why="; ".join(f"{x} has reviewed it {k} times (paid)" for x, k in over)
+                                    + " and would be asked again",
+                                note=f"A review costs money each time, so after {REVIEW_PAID_MAX} paid reviews by one "
+                                     "reviewer the next is a decision, not a reflex. Delivery Lead: read the verdicts "
+                                     "above and either settle it (one more review is then allowed) or ask the owner."))
                 c["stage"] = "handled"
             elif not gate.readiness(r["verdicts"], r["open_subs"], state):
-                actions.append({"kind": "gate", "issue": n, "why": "QA and Security approved the head"})
+                actions.append(OpenPR(issue=n, why="QA and Security approved the head"))
                 c["stage"] = "handled"
+
+    # Daily standup (2026-11-03): a ticket that holds a slot and hasn't moved goes to the Delivery Lead, so a
+    # deadlock is found the same day, not by the owner. Not while the day's money is gone: nobody could act on it.
+    working_on = {o["number"] for row in roster_rows if row["status"] == "working" for o in row.get("on", [])}
+    delivery_ceiling = dept["roles"].get("delivery", {}).get("ceiling_usd", 0)
+    if daily_cap - spent_today >= delivery_ceiling:
+        for c, why, age in standup.stalled([c for c in active if c["stage"] != "handled"], review, working_on, now):
+            actions.append(label_edit(issue=c["number"], remove=[], add=[hold(c["number"])],
+                            why=f"no change for {age:.0f} h while it holds a slot",
+                            note=standup.note(why, age, use)))
+            c["flags"] = c["flags"] + [hold(c["number"])]
+            c["stage"] = "handled"
+
+    def pm_unchanged(c):
+        """True when the PM already ran on this issue and nothing meant for it has happened since."""
+        n = c["number"]
+        return bool((pm_seen or {}).get(n)) and n not in answered and n not in pm_touched
+
+    def external(role):
+        """Open PRs this reviewer has not seen at their current head (#82)."""
+        if not external_prs:
+            return []
+        return [{"number": p["number"], "flags": [], "mode": "pr"} for p in pr_reviews
+                if not prreview.is_bot(p["author"]) and prreview.SKIP_LABEL not in p["labels"]
+                and role not in p["verdicts"]]
 
     def waiting(role):
         if role in ("qa", "security"):
             return [c for c in active if c["stage"] == "agent-review" and c["number"] in review
-                    and role not in review[c["number"]]["verdicts"] and review[c["number"]].get("ci", "green") == "green"]
+                    and role not in review[c["number"]]["verdicts"] and review[c["number"]].get("ci", "green") == "green"] \
+                + external(role)
         if role in ("dev", "devops"):
             mine = [c for c in active if infra(c) == (role == "devops")]
             fixes = [c for c in mine if c["stage"] == "in-dev" and "needs/fix" in c["flags"]]
@@ -267,8 +379,10 @@ def decide(dept, cfg, cards, roster_rows, review, merged, backlog, now, spent_to
             return order(fixes) + order(fresh)
         if role == "sanity":
             return [c for c in active if c["stage"] == "deployed-dev"]
+        if role == "delivery":
+            return order([c for c in cards if c["stage"] != "done" and "needs/delivery" in c["flags"]])
         if role == "pm":
-            asked = [c for c in active if "needs/plan" in c["flags"]]
+            asked = [c for c in active if "needs/plan" in c["flags"] and not pm_unchanged(c)]
             roadmap = [{"number": roadmap_request, "flags": ["needs/roadmap"]}] if roadmap_request else []
             queued = [c for c in active if c["stage"] in ("planned", "in-dev")]
             room = len(queued) < dept["roles"]["dev"].get("wip", 1)
@@ -284,7 +398,7 @@ def decide(dept, cfg, cards, roster_rows, review, merged, backlog, now, spent_to
                      "qa": ("agent-review",), "security": ("agent-review",), "sanity": ("deployed-dev",)}
         mine = [c for c in cards if c["stage"] in stages_of.get(role, ())
                 and (role not in ("dev", "devops") or infra(c) == (role == "devops"))]
-        held = [c for c in mine if HOLD & set(c["flags"])]
+        held = [c for c in mine if HOLD & set(c["flags"]) and "blocked/parked" not in c["flags"]]   # parked: nobody's wait
         if role in ("qa", "security"):
             stuck = [c for c in mine if c not in held and review.get(c["number"], {}).get("ci") == "blocked"]
             if stuck:
@@ -305,7 +419,8 @@ def decide(dept, cfg, cards, roster_rows, review, merged, backlog, now, spent_to
             return "waiting_agent", [], "Dev's planned queue is full, so nothing new is planned yet"
         if held:
             flags = sorted({f for c in held for f in HOLD & set(c["flags"])})
-            kind = {("blocked/budget",): "budget_daily", ("blocked/deps",): "waiting_agent"}.get(tuple(flags), "waiting_owner")
+            kind = "budget_daily" if flags == ["blocked/budget"] else \
+                "waiting_agent" if set(flags) <= {"blocked/deps", "needs/delivery"} else "waiting_owner"
             return kind, [c["number"] for c in held], f"{len(held)} ticket(s) held: {', '.join(flags)}"
         return "nothing_to_do", [], "nothing in this role's stages"
 
@@ -316,6 +431,17 @@ def decide(dept, cfg, cards, roster_rows, review, merged, backlog, now, spent_to
             explain.append({"role": role, "reason": reason, "issues": list(issues), "detail": detail, "until": until,
                             "next": [c["number"] for c in queue.get(role, [])[:3]]})
 
+    stuck_cards = {c["number"]: c for c in cards}
+    for (n, skill), reasons in sorted((outbox_stuck or {}).items()):
+        c = stuck_cards.get(n)
+        if c and not {"needs/delivery", "needs/human"} & set(c["flags"]) and c["stage"] not in ("handled", "done"):
+            actions.append(label_edit(issue=n, remove=[], add=["needs/delivery"],
+                            why=f"{skill} sent {len(reasons)} results in a row that were refused, so nothing it did reached the ticket",
+                            note=f"Stopped: the last {len(reasons)} runs of {skill} on this ticket were paid for, but what they asked "
+                                 f"for was refused, so nothing changed here. The latest reason: {reasons[-1]} A third run would "
+                                 "repeat it, so it stops. Delivery Lead: if an instruction or a rule is wrong, say what must "
+                                 "change; if the ticket is the problem, route it back."))
+            c["flags"] = list(c["flags"]) + ["needs/delivery"]
     budget_left = daily_cap - spent_today
     for row in roster_rows:
         role = row["role"]
@@ -323,6 +449,9 @@ def decide(dept, cfg, cards, roster_rows, review, merged, backlog, now, spent_to
             continue
         skill = dept["roles"][role].get("skill", role)   # fixtures recorded before #112 carry no skill
         queue[role] = order(waiting(skill)) if skill not in ("dev", "devops", "pm") else waiting(skill)
+        looped = [c for c in queue[role] if (paid_runs or {}).get((c["number"], skill), 0) >= loop_cap(skill)]
+        stuck = [c for c in queue[role] if c not in looped and (c["number"], skill) in (outbox_stuck or {})]
+        queue[role] = [c for c in queue[role] if c not in looped and c not in stuck]
         if row["status"] == "working":
             tell(role, "working", [o["number"] for o in row.get("on", [])], "run in progress")
             continue
@@ -336,12 +465,22 @@ def decide(dept, cfg, cards, roster_rows, review, merged, backlog, now, spent_to
                  until=end.isoformat(timespec="seconds"))
             continue
         todo = queue[role]
+        if not todo and stuck:
+            tell(role, "outbox_refused", [c["number"] for c in stuck],
+                 "; ".join(f"#{c['number']}: {outbox_stuck[(c['number'], skill)][-1]}" for c in stuck)
+                 + f". Not started again: its last {OUTBOX_REFUSED_MAX} results were refused, so nothing changed")
+            continue
+        if not todo and looped:
+            tell(role, "loop_stopped", [c["number"] for c in looped],
+                 "; ".join(f"#{c['number']}: {paid_runs[(c['number'], skill)]} paid runs today" for c in looped)
+                 + f". Stopped on it until tomorrow: {loop_cap(skill)} runs in a day means it is going round in a circle")
+            continue
         if not todo:
             tell(role, *why_empty(skill))
             continue
         ceiling = dept["roles"][role]["ceiling_usd"]
         if ceiling > budget_left:
-            actions.append({"kind": "skip", "role": role, "issue": todo[0]["number"], "why": "not enough budget left today"})
+            actions.append(Skip(role=role, issue=todo[0]["number"], why="not enough budget left today"))
             tell(role, f"budget_{budget_kind}", [todo[0]["number"]],
                  f"needs ${ceiling:.2f}, ${max(budget_left, 0):.2f} left under the {budget_kind} cap")
             continue
@@ -349,11 +488,26 @@ def decide(dept, cfg, cards, roster_rows, review, merged, backlog, now, spent_to
         pick = todo[0]
         tell(role, "starting", [pick["number"]], "picked up this tick")
         if skill == "pm" and not {"needs/plan", "needs/roadmap"} & set(pick["flags"]):
-            actions.append({"kind": "label", "issue": pick["number"], "remove": [], "add": ["needs/plan"],
-                            "why": "next in the plan; the planned queue has room"})
-        actions.append({"kind": "run", "role": role, "issue": pick["number"],
-                        "why": f"{role} on coffee break >= {row['break_min']} min" if row["break_min"] else f"{role} is free"})
+            actions.append(label_edit(issue=pick["number"], remove=[], add=["needs/plan"],
+                            why="next in the plan; the planned queue has room"))
+        actions.append(Dispatch(role=role, issue=pick["number"], mode=pick.get("mode"),
+                        why=f"{role} on coffee break >= {row['break_min']} min" if row["break_min"] else f"{role} is free"))
     return actions
+
+
+def reviews_over(n, r, review_paid):
+    """[(reviewer, paid reviews)] for each reviewer still to give a verdict on this head that has used its paid
+    reviews of ticket n: REVIEW_PAID_MAX, or 1 since an answered hold (r["since"])."""
+    cap = 1 if r.get("granted") else REVIEW_PAID_MAX
+    since = _at(r["since"]) if r.get("since") else None
+    out = []
+    for x in REVIEWERS:
+        if x in r["verdicts"]:
+            continue
+        k = sum(1 for t in (review_paid or {}).get((n, x), ()) if since is None or _at(t) > since)
+        if k >= cap:
+            out.append((x, k))
+    return out
 
 
 # ---------- gathering state (GitHub, via gh) ----------
@@ -363,13 +517,15 @@ def review_counts(comments, owners):
     dispatcher's holds restarts the counts and grants one more try: otherwise "one more round" bounced straight
     back to the owner on the next tick, because the old counts still read as over the limit (#23, 2026-10-28)."""
     owners = {o.lower() for o in owners}
-    rounds, bounces, kicks, held, granted = {}, 0, 0, False, False
+    rounds, bounces, kicks, held, granted, since = {}, 0, 0, False, False, None
     for cm in comments:
         body = cm.get("body") or ""
         login = cm["user"]["login"]
-        if login.lower() in owners:
+        if login.lower() in owners or (login == org.BOT_LOGIN and outbox.DELIVERY_ROUTE in body):
+            # The owner's reply, or the Delivery Lead settling it without the owner, answers the hold.
             if held:
                 rounds, bounces, kicks, held, granted = {}, 0, 0, False, True
+                since = cm.get("created_at")
             continue
         if login != org.BOT_LOGIN:
             continue
@@ -383,7 +539,14 @@ def review_counts(comments, owners):
                 continue
             if role in ("qa", "security"):
                 rounds[role] = rounds.get(role, 0) + 1
-    return {"rounds": rounds, "ci_bounces": bounces, "ci_kicks": kicks, "granted": granted}
+    return {"rounds": rounds, "ci_bounces": bounces, "ci_kicks": kicks, "granted": granted, "since": since}
+
+
+def own_tickets(cards):
+    """The cards that are tickets. A sub-issue is a finding of its parent's fix round, not work of its own: handed to the
+    PM and Dev as a ticket it was planned and "worked" separately, cost two runs, and was never closed, so the parent's
+    pull request waited for it (2026-11-10)."""
+    return [c for c in cards if not c.get("parent")]
 
 
 def review_state(repo, cards, owners=()):
@@ -399,13 +562,27 @@ def review_state(repo, cards, owners=()):
         head = commit["sha"]
         checks = ci.head_checks(repo, head, office.gh_json)
         pushed = datetime.fromisoformat(commit["commit"]["committer"]["date"].replace("Z", "+00:00"))
-        comments = office.gh_json("api", f"repos/{repo}/issues/{n}/comments?per_page=100")
+        comments = office.issue_comments(repo, n)
         subs = office.gh_json("api", f"repos/{repo}/issues/{n}/sub_issues")
+        open_subs = [s["number"] for s in subs if s["state"] == "open"]
+        resolved = {s for s, _ in gate.resolved_sub_issues(comments, head, open_subs)}   # the gate closes these when it opens the PR
         out[n] = {"head": head, "verdicts": gate.latest_verdicts(comments, head), **review_counts(comments, owners),
-                  "open_subs": [s["number"] for s in subs if s["state"] == "open"],
+                  "open_subs": [s for s in open_subs if s not in resolved],
                   "ci": ci.ci_state(checks), "ci_failing": ci.failing(checks),
                   "head_age_min": (datetime.now(timezone.utc) - pushed).total_seconds() / 60}
     return out
+
+
+def external_pr_reviews(prof):
+    """Open PRs for QA and Security to review, or [] with the switch off: then the tick makes no pull-request read at
+    all. A read that fails is reported as unchecked and queues nothing, never "no PRs" or "no verdict yet" (#82, L-012)."""
+    if not (prof.get("review") or {}).get("external_prs"):
+        return []
+    try:
+        return prreview.reviews_needed(prof["repo"])
+    except (subprocess.CalledProcessError, RuntimeError, KeyError, TypeError, ValueError) as e:
+        print(f"warning: pull-request review UNCHECKED for {prof['repo']}, none queued: {e}")
+        return []
 
 
 def awaiting_pr_ci(repo, cards, owners=()):
@@ -425,7 +602,7 @@ def awaiting_pr_ci(repo, cards, owners=()):
         state = ci.ci_state(checks)
         entry = {"head": head, "ci": state, "url": mine[0]["url"]}
         if state == "red":
-            comments = office.gh_json("api", f"repos/{repo}/issues/{n}/comments?per_page=100")
+            comments = office.issue_comments(repo, n)
             entry |= {"ci_failing": ci.failing(checks), "ci_bounces": review_counts(comments, owners)["ci_bounces"]}
         out[n] = entry
     return out
@@ -462,6 +639,15 @@ def dependency_state(repo, cards):
 
 def sanity_passes(repo, cards):
     """deployed-dev issues with a Sanity pass verdict from the bot posted after the issue last went to deployed-dev."""
+    return _sanity_with(repo, cards, "pass")
+
+
+def sanity_fails(repo, cards):
+    """deployed-dev issues whose newest Sanity verdict since the deploy is a fail."""
+    return _sanity_with(repo, cards, "fail")
+
+
+def _sanity_with(repo, cards, decision):
     out = set()
     for c in cards:
         if c["stage"] != "deployed-dev":
@@ -471,15 +657,19 @@ def sanity_passes(repo, cards):
         pages = office.gh_json("api", "--paginate", "--slurp", f"repos/{repo}/issues/{n}/events?per_page=100")
         since = max((e["created_at"] for page in pages for e in page if e.get("event") == "labeled"
                      and (e.get("label") or {}).get("name") == "stage/deployed-dev"), default="")
-        comments = [cm for page in office.gh_json("api", "--paginate", "--slurp",
-                                                  f"repos/{repo}/issues/{n}/comments?per_page=100") for cm in page]
-        if sanity_passed(comments, since):
+        comments = office.issue_comments(repo, n)
+        if sanity_decision(comments, since) == decision:
             out.add(n)
     return out
 
 
 def sanity_passed(comments, since=""):
     """True when the bot's newest Sanity verdict after `since` (ISO time) is a pass."""
+    return sanity_decision(comments, since) == "pass"
+
+
+def sanity_decision(comments, since=""):
+    """The decision of the bot's newest Sanity verdict after `since` (ISO time), or None."""
     last = None
     for cm in comments:
         if cm["user"]["login"] != org.BOT_LOGIN or cm["created_at"] < since:
@@ -491,22 +681,41 @@ def sanity_passed(comments, since=""):
                 continue
             if v.get("role") == "sanity":
                 last = v.get("decision")
-    return last == "pass"
+    return last
 
 
 def provider_refusal(events, now, pause_min=REFUSAL_PAUSE_MIN):
-    """The AI provider's message if the latest settled run was refused less than `pause_min` ago, else None."""
+    """The AI provider's message if the latest settled run was refused and its pause has not ended, else None.
+
+    The pause is pause_min minutes; when the refusal says when access returns (REGAIN), it lasts until then, but
+    never more than REFUSAL_PROBE_H hours at a time, so a limit the owner raises early is found within half a day."""
     settled = [e for e in events if e["type"] == "cost"]
     if not settled:
         return None
     last = max(settled, key=lambda e: e["ts"])
     if not last.get("error"):
         return None
-    age = (now - datetime.fromisoformat(last["ts"])).total_seconds() / 60
-    if age >= pause_min:
+    at = datetime.fromisoformat(last["ts"])
+    m = REGAIN.search(last["error"])
+    regain = datetime.fromisoformat(f"{m.group(1)}T{m.group(2)}:00+00:00") if m else None
+    until = min(regain, at + timedelta(hours=REFUSAL_PROBE_H)) if regain and regain > at else at + timedelta(minutes=pause_min)
+    if now >= until:
         return None
-    return (f"the AI provider refused the last run ({last['role']} on {last['issue']}, {int(age)} min ago): "
-            f"{last['error']} Next try in {int(pause_min - age) + 1} min.")
+    age = int((now - at).total_seconds() // 60)
+    left = until - now
+    nxt = f"{int(left.total_seconds() // 60) + 1} min" if left < timedelta(hours=1) else f"{left.total_seconds() / 3600:.0f} h"
+    what = (f" Access returns {regain:%Y-%m-%d %H:%M} UTC; one try every {REFUSAL_PROBE_H} h until then. Raised the limit?"
+            f" Try now: gh workflow run dispatch.yml -R {org.REPO} -f probe=true") if regain and regain > at else ""
+    return (f"the AI provider refused the last run ({last['role']} on {last['issue']}, {age} min ago): "
+            f"{last['error']}{what} Next try in {nxt}.")
+
+
+def current_refusal(events, now):
+    """provider_refusal, except on a tick started by hand with probe=true: that one tries the provider even inside a
+    pause, for an owner who has just raised the limit. If the provider still refuses, the pause carries on."""
+    if os.environ.get("ORGROVE_PROBE") == "true":
+        return None
+    return provider_refusal(events, now)
 
 
 def merged_issues(repo, cards, gh=None):
@@ -577,16 +786,204 @@ def deploy_states(repo, workflow, merged, now, gh=None, known_failing=()):
     return out
 
 
-def answered_issues(repo, cards, owners):
-    """Held issues whose newest comment is from an owner, i.e. the owner has replied."""
-    out = set()
+def owner_holds(repo, cards, owners):
+    """(answered, unvetted, later) for the needs/human issues, from one comments read each.
+    answered: the newest comment is an owner's, i.e. the owner has replied.
+    unvetted: no Delivery Lead question (outbox.is_owner_question: the marker and every section, written by the bot)
+              since an owner last commented.
+    later: asked, and the question is marked no rush (outbox.is_later): not counted as waiting on the owner today."""
+    answered, unvetted, later = set(), set(), set()
+    owner_set = {o.lower() for o in owners}
     for c in cards:
         if "needs/human" not in c["flags"] or c["stage"] == "done":
             continue
-        last = office.gh_json("api", f"repos/{repo}/issues/{c['number']}/comments?per_page=100")
-        if last and last[-1]["user"]["login"].lower() in {o.lower() for o in owners}:
-            out.add(c["number"])
+        comments = office.issue_comments(repo, c["number"])
+        if comments and comments[-1]["user"]["login"].lower() in owner_set:
+            answered.add(c["number"])
+            continue
+        asked = owner_spoke = -1
+        for i, x in enumerate(comments):
+            if x["user"]["login"].lower() in owner_set:
+                owner_spoke = i
+            elif x["user"]["login"] == org.BOT_LOGIN and outbox.is_owner_question(x.get("body") or ""):
+                asked = i
+        if asked < owner_spoke or asked == -1:
+            unvetted.add(c["number"])
+        elif outbox.is_later(comments[asked]["body"]):
+            later.add(c["number"])
+    return answered, unvetted, later
+
+
+def delivery_tries(events, day, repo):
+    """issue -> Delivery Lead runs reserved on it this local day, from the ledger (issue numbers are per repo)."""
+    return role_tries(events, day, repo, "delivery")
+
+
+def role_tries(events, day, repo, role):
+    """issue -> runs of `role` (as role-run names it: both PMs are `pm`) reserved on it this local day."""
+    out = {}
+    for e in events:
+        if e["type"] == "reserve" and e.get("role") == role and e.get("day") == day:
+            r, _, num = (e.get("issue") or "").partition("#")
+            if r == repo and num.isdigit():
+                out[int(num)] = out.get(int(num), 0) + 1
     return out
+
+
+def pm_last_runs(events, repo):
+    """issue -> when the last settled PM run on it ended. Runs still going (no cost yet) don't count."""
+    reserved = {e["run_id"]: e["issue"] for e in events if e["type"] == "reserve" and e.get("role") == "pm"}
+    out = {}
+    for e in events:
+        if e["type"] != "cost" or e["run_id"] not in reserved or not e.get("ts"):
+            continue
+        r, _, num = (reserved[e["run_id"]] or "").partition("#")
+        if r == repo and num.isdigit() and (int(num) not in out or _at(e["ts"]) > _at(out[int(num)])):
+            out[int(num)] = e["ts"]
+    return out
+
+
+def _pages(path):
+    """Every page of a REST list (gh --paginate --slurp), flattened. Raises if gh fails."""
+    return [x for page in office.gh_json("api", "--paginate", "--slurp", path) or [] for x in page]
+
+
+def _mine(login, owner_set):
+    """An owner or the ORGrove bot, whether GitHub writes its login with or without the `[bot]` suffix."""
+    login = (login or "").lower()
+    return login in owner_set or login.removesuffix("[bot]") == org.BOT_LOGIN.lower().removesuffix("[bot]")
+
+
+def pm_changes(repo, cards, pm_seen, owners):
+    """Issues with a needs/plan ask that changed for the PM since its last run ended (#77, #329, #336).
+    A change is, after the run: an owner's or an agent's comment (the dispatcher's own notes don't count), a body
+    edit by an owner or the bot, or a label change by an owner or the bot other than the dispatcher's own needs/plan.
+    Other people's comments, edits and labels can neither start nor stop a PM run. The card's updatedAt filters
+    first, so only a ticket something touched costs reads: all comment pages and all event pages (REST, not the
+    GraphQL allowance) and one GraphQL field, `userContentEdits`, 1 point measured live (L-007).
+    A card with no update time, or a thread that can't be read, counts as changed: the PM runs."""
+    owner_set = {o.lower() for o in owners}
+    owner, _, name = repo.partition("/")
+    out = set()
+    for c in cards:
+        n, seen = c["number"], (pm_seen or {}).get(c["number"])
+        if "needs/plan" not in c["flags"] or c["stage"] == "done" or not seen:
+            continue
+        if not c.get("updated"):
+            out.add(n)
+            continue
+        if _at(c["updated"]) <= _at(seen):
+            continue
+        try:
+            if _changed_since(repo, owner, name, n, _at(seen), owner_set):
+                out.add(n)
+        except Exception:
+            out.add(n)
+    return out
+
+
+def _changed_since(repo, owner, name, n, seen, owner_set):
+    for x in office.issue_comments(repo, n):   # every page (L-017)
+        if (_mine((x.get("user") or {}).get("login"), owner_set) and _at(x["created_at"]) > seen
+                and not (x.get("body") or "").startswith("ORGrove dispatcher:")):
+            return True
+    for x in _pages(f"repos/{repo}/issues/{n}/events?per_page=100"):
+        if x.get("event") not in ("labeled", "unlabeled") or _at(x["created_at"]) <= seen:
+            continue
+        label = (x.get("label") or {}).get("name")
+        dispatcher_note = label == "needs/plan" and not _mine_owner(x, owner_set)
+        if _mine((x.get("actor") or {}).get("login"), owner_set) and not dispatcher_note:
+            return True
+    q = ("query($o:String!,$n:String!,$i:Int!){repository(owner:$o,name:$n){issue(number:$i)"
+         "{userContentEdits(first:5){nodes{createdAt editor{login}}}}}}")
+    data = office.gh_json("api", "graphql", "-f", f"query={q}", "-f", f"o={owner}", "-f", f"n={name}", "-F", f"i={n}")
+    nodes = data["data"]["repository"]["issue"]["userContentEdits"]["nodes"] or []
+    return any(_mine((e.get("editor") or {}).get("login"), owner_set) and _at(e["createdAt"]) > seen for e in nodes)
+
+
+def _mine_owner(event, owner_set):
+    """True when an owner (not the bot) made this event."""
+    return ((event.get("actor") or {}).get("login") or "").lower() in owner_set
+
+
+def paid_runs(events, day, repo):
+    """(issue, role) -> runs that reached the model this local day (settled above $0, no error), for LOOP_RUNS.
+    A refused run costs $0 and is L-014's pause, not a loop; counting it would stop a ticket for the provider's fault."""
+    out = {}
+    for e in events:
+        if e["type"] == "cost" and e.get("day") == day and not e.get("error") and float(e.get("usd") or 0) > 0:
+            r, _, num = (e.get("issue") or "").partition("#")
+            if r == repo and num.isdigit():
+                k = (int(num), e.get("role"))
+                out[k] = out.get(k, 0) + 1
+    return out
+
+
+def outbox_refusals(events, day, repo, released=None):
+    """(issue, role) -> the reasons, when its last OUTBOX_REFUSED_MAX paid runs today each had their result refused by
+    the apply step, one after another. A run that applied clears the count; a provider refusal is not one (it has
+    its own pause). A refused result changes nothing on the ticket, so without this the dispatcher starts the same
+    role again, and pays again, until the loop cap (2026-11-10: 12 runs, $1.08, before anyone looked).
+
+    `released` is issue -> when a person or the Delivery Lead decided about it (release_times). Refusals before that
+    do not count: a stop that cannot be released is a loop of its own (2026-11-10: the owner answered, the fix was
+    merged, QA was never started again, and the ticket went back to the Delivery Lead seven times)."""
+    streak, released = {}, released or {}
+    for e in sorted((e for e in events if e["type"] == "cost" and e.get("day") == day and not e.get("error")),
+                    key=lambda e: e["ts"]):
+        r, _, num = (e.get("issue") or "").partition("#")
+        if r != repo or not num.isdigit():
+            continue
+        k = (int(num), e.get("role"))
+        if int(num) in released and _at(e["ts"]) <= _at(released[int(num)]):
+            continue                      # settled since: this refusal is history
+        if e.get("outbox_refused"):
+            streak[k] = streak.get(k, []) + [e["outbox_refused"]]
+        elif float(e.get("usd") or 0) > 0:
+            streak[k] = []
+    return {k: v for k, v in streak.items() if len(v) >= OUTBOX_REFUSED_MAX}
+
+
+def stuck_now(events, day, repo, owners, comments_of=None):
+    """outbox_refusals, minus what a person or the Delivery Lead has since decided about (release_times)."""
+    raw = outbox_refusals(events, day, repo)
+    if not raw:
+        return raw
+    return outbox_refusals(events, day, repo, release_times(repo, raw, owners, comments_of))
+
+
+def release_times(repo, stuck, owners, comments_of=None):
+    """issue -> when the newest decision was made on it: a comment by an owner, or the Delivery Lead's route. Only for
+    the tickets `stuck` names (two refusals in a row), so the extra reads are rare."""
+    comments_of = comments_of or office.issue_comments
+    owner_set = {o.lower() for o in owners}
+    out = {}
+    for n in sorted({n for n, _ in stuck}):
+        for c in comments_of(repo, n):
+            login = ((c.get("user") or {}).get("login") or "").lower()
+            body = c.get("body") or ""
+            by_owner = login in owner_set
+            by_delivery = f"<!-- {outbox.DELIVERY_ROUTE}" in body and login.removesuffix("[bot]") == org.BOT_LOGIN.lower().removesuffix("[bot]")
+            if (by_owner or by_delivery) and (n not in out or _at(c["created_at"]) > _at(out[n])):
+                out[n] = c["created_at"]
+    return out
+
+
+def review_paid(events, repo):
+    """(issue, reviewer) -> settle times of its paid runs (above $0, no error) in these events, for REVIEW_PAID_MAX.
+    Like paid_runs, a refused $0 run is the provider's fault and doesn't count."""
+    out = {}
+    for e in events:
+        if e["type"] == "cost" and e.get("role") in REVIEWERS and not e.get("error") and float(e.get("usd") or 0) > 0:
+            r, _, num = (e.get("issue") or "").partition("#")
+            if r == repo and num.isdigit():
+                out.setdefault((int(num), e["role"]), []).append(e["ts"])
+    return out
+
+
+def answered_issues(repo, cards, owners):
+    """Held issues whose newest comment is from an owner, i.e. the owner has replied."""
+    return owner_holds(repo, cards, owners)[0]
 
 
 def board_ids(prof):
@@ -604,56 +1001,14 @@ def skill_of(role, prof):
     return roles.get(role, {}).get("skill", role)
 
 
-def execute(repo, project, actions, dry_run, prof=None):
-    ids, labels_synced = None, False
-    for a in actions:
-        print(json.dumps(a))
-        if dry_run or a["kind"] == "skip":
-            continue
-        if a["kind"] == "label":
-            if stages.DONE_LABEL in a["add"] and not labels_synced:
-                # stage/done is new (2026-10-30): an install from before it lacks the label, and GitHub refuses to
-                # add a missing one. The sync only creates what is missing; one label list per tick that needs it.
-                sync_labels.main(repo)
-                labels_synced = True
-            args = ["issue", "edit", str(a["issue"]), "-R", repo]
-            if a["remove"]:
-                args += ["--remove-label", ",".join(a["remove"])]
-            if a["add"]:
-                args += ["--add-label", ",".join(a["add"])]
-            subprocess.run(["gh", *args], check=True, capture_output=True)
-            if a.get("quiet"):
-                continue
-            # needs/human is a question for the owners: mention them so it reaches their phone.
-            mention = " ".join(f"@{o}" for o in manifest.owners_for_repo(repo)) + " " if "needs/human" in a["add"] else ""
-            note = f"\n\n{a['note']}" if a.get("note") else ""
-            subprocess.run(["gh", "issue", "comment", str(a["issue"]), "-R", repo, "--body",
-                            f"{mention}ORGrove dispatcher: {a['why']} → labels +{a['add']} −{a['remove']}{note}"],
-                           check=True, capture_output=True)
-        elif a["kind"] == "board":
-            ids = ids or board_ids(prof)
-            pid, field, options = ids
-            subprocess.run(["gh", "project", "item-edit", "--project-id", pid, "--id", a["item_id"],
-                            "--field-id", field, "--single-select-option-id", options[a["status"]]],
-                           check=True, capture_output=True)
-        elif a["kind"] == "close":
-            subprocess.run(["gh", "issue", "close", str(a["issue"]), "-R", repo, "--comment",
-                            f"ORGrove dispatcher: {a['why']}."], check=True, capture_output=True)
-        elif a["kind"] == "gate":
-            gate.main(["--repo", repo, "--issue", str(a["issue"])])
-        elif a["kind"] == "run":
-            # Starting a workflow needs actions:write on orgrove, which the App token deliberately
-            # lacks; the dispatcher's own GITHUB_TOKEN is passed in as ORGROVE_DISPATCH_TOKEN.
-            env = {**os.environ, "GH_TOKEN": os.environ.get("ORGROVE_DISPATCH_TOKEN", os.environ.get("GH_TOKEN", ""))}
-            subprocess.run(["gh", "workflow", "run", "role-run.yml", "-R", office.ORGROVE_REPO,
-                            "-f", f"role={skill_of(a['role'], prof)}", "-f", f"issue={a['issue']}", "-f", f"project={project}",
-                            "-f", f"mode={a.get('mode', 'ticket')}"],
-                           check=True, capture_output=True, env=env)
+def executor_for(prof):
+    """The Executor that applies one project's actions: GitHub behind every port."""
+    return executor.github(prof["repo"], prof["project"], lambda role: skill_of(role, prof), lambda: board_ids(prof))
 
 
 # Most informative reason first when a role is idle in several projects (#98).
-REASON_RANK = ["working", "starting", "provider_refused", "on_break", "budget_monthly", "budget_daily", "waiting_owner",
-               "waiting_agent", "nothing_to_do"]
+REASON_RANK = ["working", "starting", "provider_refused", "on_break", "loop_stopped", "outbox_refused", "budget_monthly", "budget_daily",
+               "waiting_owner", "waiting_agent", "nothing_to_do", "parked"]   # every reason decide() and tick() tell
 
 
 def combine(per_project):
@@ -720,14 +1075,16 @@ def owner_wakes(events, waiting):
     return n
 
 
-def owner_waiting(project, cards):
-    """What is waiting on a human right now: questions, draft approvals, PRs to merge."""
+def owner_waiting(project, cards, later=()):
+    """What is waiting on a human right now: questions, draft approvals, PRs to merge. A no-rush question is listed
+    with later=True, so a count of what is waiting today leaves it out (2026-11-02: 13 "waiting", 1 urgent)."""
     out = []
     for c in cards:
         if c["stage"] == "done":
             continue
         if "needs/human" in c["flags"]:
-            out.append({"project": project, "issue": c["number"], "what": "question", "title": c["title"]})
+            out.append({"project": project, "issue": c["number"], "what": "question", "title": c["title"]}
+                       | ({"later": True} if c["number"] in later else {}))
         elif "needs/approval" in c["flags"]:
             out.append({"project": project, "issue": c["number"], "what": "approve draft", "title": c["title"]})
         elif c["stage"] == "awaiting-review":
@@ -760,7 +1117,7 @@ def load_candidate(spec):
 
 
 def _key(action):
-    return json.dumps(action, sort_keys=True, default=str)
+    return json.dumps(as_dict(action), sort_keys=True, default=str)
 
 
 def diff_actions(live, candidate):
@@ -779,12 +1136,12 @@ def diff_actions(live, candidate):
 
 
 def shadow_compare(candidate, args, kwargs, live):
-    """Run the candidate on deep copies of the live decide() arguments. It never reaches execute().
+    """Run the candidate on deep copies of the live decide() arguments. It never reaches the Executor.
     Returns {"live_only", "candidate_only", "error"}."""
     try:
         got = candidate(*copy.deepcopy(args), **copy.deepcopy(kwargs))
         only_live, only_cand = diff_actions(live, list(got))
-        return {"live_only": only_live, "candidate_only": only_cand, "error": None}
+        return {"live_only": [as_dict(x) for x in only_live], "candidate_only": [as_dict(x) for x in only_cand], "error": None}
     except Exception as e:
         return {"live_only": [], "candidate_only": [], "error": f"{type(e).__name__}: {e}"}
 
@@ -815,7 +1172,7 @@ def record_shadow(event):
 def claim(roster_rows, actions):
     """After one project's decisions, mark roles that were just given a run as working, so the
     next project in the same tick can't hand the same agent a second job."""
-    taken = {a["role"] for a in actions if a["kind"] == "run"}
+    taken = {a.role for a in actions if isinstance(a, Dispatch)}
     return [r | {"status": "working", "break_since": None} if r["role"] in taken else r for r in roster_rows]
 
 
@@ -829,15 +1186,15 @@ def free_time(bcfg, roles, roster_rows, now, events, budget_left, profiles, dry_
         if blocked:
             print(f"free time: {role} not started ({blocked})")
             continue
-        for prof in [p for p in profiles if p.get("free_time")]:
+        for prof in [p for p in profiles if p.get("free_time") and not budget.parked(bcfg, p["repo"])]:
             found = freetime.targets(prof["repo"], ft["max_prs"])
             if not found:
                 print(f"free time: nothing to look at in {prof['repo']}")
                 continue
             issue = prof["free_time"]["issue"]
-            action = {"kind": "run", "role": role, "issue": issue, "mode": "free_time",
-                      "why": f"free time: {len(found)} failing Dependabot PR(s) to look at"}
-            execute(prof["repo"], prof["project"], [action], dry_run, prof)
+            action = Dispatch(role=role, issue=issue, mode="free_time",
+                      why=f"free time: {len(found)} failing Dependabot PR(s) to look at")
+            executor_for(prof).apply([action], dry_run)
             roles[role] = {"role": role, "reason": "starting", "issues": [issue], "project": prof["project"],
                            "detail": "free time: " + ", ".join(f"#{t['number']}" for t in found), "until": None, "next": []}
             budget_left -= ft["ceiling_usd"]
@@ -862,6 +1219,11 @@ def api_pause(allowance, reserve, now, dry_run=False):
     return True
 
 
+def expired_lines(events, now):
+    """Log lines for every unsettled reservation past its expiry, whatever day it was made (#41, #257)."""
+    return budget.expired_log_lines(events, now.isoformat(timespec="seconds"))
+
+
 def main(argv=None):
     p = argparse.ArgumentParser(prog="orgrove.dispatch")
     p.add_argument("--project", help="only this project (default: every profile, in `order`)")
@@ -879,13 +1241,16 @@ def main(argv=None):
         return 0
     day = datetime.now(ZoneInfo(bcfg["timezone"])).date().isoformat()
     events = office.ledger_events(day[:7])
-    spent_today, spent_month = budget.spent(events, day)
-    budget_left = min(bcfg["daily_usd"], bcfg["monthly_usd"] - spent_month + spent_today) - spent_today
-    budget_kind = "monthly" if bcfg["monthly_usd"] - spent_month < bcfg["daily_usd"] - spent_today else "daily"
+    yesterday = (date.fromisoformat(day) - timedelta(days=1)).isoformat()
+    events_2d = events if yesterday[:7] == day[:7] else office.ledger_events(yesterday[:7]) + events   # the 1st
+    spent_today, _ = budget.spent(events, day)
+    for line in expired_lines(events, datetime.now(timezone.utc)):
+        print(line)   # a crashed run's reservation, still counted at its ceiling (#41)
+    budget_left, budget_kind = budget.left(bcfg, events, day)
     per_project, waiting_on_owner, acted, deploy_wait = [], [], False, None
     run_rows = office.runs(events)
     now = datetime.now(timezone.utc)
-    refused = provider_refusal(events, now)
+    refused = current_refusal(events, now)
     roster_rows = None
     profiles = [manifest.project(a.project)] if a.project else manifest.projects()
     candidate, candidate_error = load_candidate(a.shadow) if a.shadow else (None, None)
@@ -895,11 +1260,21 @@ def main(argv=None):
         dept = manifest.department(prof["departments"][0])
         cfg = stages.load(manifest.ROOT / dept["stages"])
         repo = prof["repo"]
+        if budget.parked(bcfg, repo):   # the owner works on it in a session: no board reads, holds or runs here
+            print(f"== {prof['project']} ({repo}): parked ([project_daily] share 0), nothing started")
+            per_project.append((prof["project"], [
+                {"role": r, "reason": "parked", "issues": [], "until": None, "next": [],
+                 "detail": f"{prof['project']} is parked: its tickets are worked in the owner's session"}
+                for r in dept["roles"] if manifest.serves(dept["roles"][r], prof["project"])]))
+            continue
         board = office.board_items(prof)
         skip = set(prof.get("skip_issues", []))
-        cards = office.pipeline(repo, cfg, board, skip)
+        cards = own_tickets(office.pipeline(repo, cfg, board, skip))
         open_numbers = {c["number"] for c in cards if c["stage"] != "done"} | skip
-        fresh = office.roster(dept, cards, run_rows, prof["project"])
+        fresh = office.roster(dept, cards, run_rows, prof["project"], now)
+        unheld = [label_edit(issue=n, remove=[f"agent/{skill}"], add=[], quiet=True,
+                             why=f"agent/{skill} with no {skill} run on it: the run ended without removing it")
+                  for n, skill in office.stale_labels(dept, cards, run_rows, prof["project"], now)]
         if roster_rows is None:
             roster_rows = fresh
         else:  # a role busy in either project is busy
@@ -916,32 +1291,55 @@ def main(argv=None):
             if env and merged else {}
         due = deploy_at(deploys, now)
         deploy_wait = min(x for x in (deploy_wait, due) if x) if (deploy_wait or due) else None
+        share_left, share_kind = budget.left(bcfg, events, day, repo)   # this project's [project_daily] share
+        project_left, project_kind = (share_left, share_kind) if share_left < budget_left else (budget_left, budget_kind)
         decide_args = (
             dept, cfg, cards, roster_rows, review_state(repo, cards, prof.get("owners", [])), merged,
-            [c for c in cards if c["stage"] == "backlog"], now, 0.0, budget_left,
+            [c for c in cards if c["stage"] == "backlog"], now, 0.0, project_left,
         )
+        holds = owner_holds(repo, cards, prof.get("owners", []))
+        pm_seen = pm_last_runs(events, repo)
         decide_kw = dict(
             focus=prof.get("milestone_focus"), roadmap_request=roadmap_request,
             has_env=bool(prof.get("environments")),
-            answered=answered_issues(repo, cards, prof.get("owners", [])),
-            budget_kind=budget_kind,
-            sanity_passed=sanity_passes(repo, cards), refused=refused, deploys=deploys,
+            answered=holds[0], unvetted=holds[1], delivery_tries=delivery_tries(events, day, repo),
+            plan_tries=role_tries(events, day, repo, "pm"), paid_runs=paid_runs(events, day, repo),
+            review_paid=review_paid(events, repo),
+            pm_seen=pm_seen, pm_touched=pm_changes(repo, cards, pm_seen, prof.get("owners", [])),
+            budget_kind=project_kind, external_prs=bool((prof.get("review") or {}).get("external_prs")),
+            pr_reviews=external_pr_reviews(prof),
+            sanity_passed=sanity_passes(repo, cards), sanity_failed=sanity_fails(repo, cards),
+            outbox_stuck=stuck_now(events, day, repo, prof.get("owners", [])), refused=refused, deploys=deploys,
             awaiting_ci=awaiting_pr_ci(repo, cards, prof.get("owners", [])), deps=dependency_state(repo, cards), project=prof["project"],
+            use=standup.use_line(budget.spent_project(events_2d, yesterday, repo), budget.spent_project(events, day, repo),
+                                 bcfg.get("project_daily", {}).get(repo)),
         )
         explained = []
         live = decide(*decide_args, explain=explained, **decide_kw)
-        actions = board_sync(cfg, cards, board, open_numbers, prof.get("status_map")) + live
+        actions = unheld + board_sync(cfg, cards, board, open_numbers, prof.get("status_map")) + live
         if a.shadow:
             result = {"live_only": [], "candidate_only": [], "error": candidate_error} if candidate_error else \
                 shadow_compare(candidate, decide_args, decide_kw | {"explain": []}, live)
             shadow_lines.append((prof["project"], result))
         per_project.append((prof["project"], explained))
-        waiting_on_owner += owner_waiting(prof["project"], cards)
-        budget_left -= sum(dept["roles"][x["role"]]["ceiling_usd"] for x in actions if x["kind"] == "run")
+        waiting_on_owner += owner_waiting(prof["project"], cards, holds[2])
+        budget_left -= sum(dept["roles"][x.role]["ceiling_usd"] for x in actions if isinstance(x, Dispatch))
         roster_rows = claim(roster_rows, actions)
-        acted = acted or any(x["kind"] in ("label", "board", "close") for x in actions)
+        acted = acted or any(not isinstance(x, (Dispatch, OpenPR, Skip)) for x in actions)
         print(f"== {prof['project']} ({repo}): {len(actions)} action(s)")
-        execute(repo, prof["project"], actions, a.dry_run, prof)
+        executor_for(prof).apply(actions, a.dry_run)
+        update_token = os.environ.get(update_branch.UPDATE_ENV_VAR, "")
+        if not update_token:
+            print(f"update-branch: skipped, {update_branch.UPDATE_ENV_VAR} is not set")
+        elif any(c["stage"] == "awaiting-review" for c in cards):   # bot PRs exist only there: no cards, no read (L-007)
+            try:   # #93: a failed read or write here never stops the tick
+                prs = office.gh_json("pr", "list", "-R", repo, "--state", "open", "--limit", "100", "--json",
+                                     "number,headRefName,headRefOid,author,mergeStateStatus,isCrossRepository,url")
+                lines = update_branch.run(repo, prs, cards, events, update_token, a.dry_run, record_status, now, day,
+                                          lambda moves: executor_for(prof).apply(moves, a.dry_run))
+                print("\n".join(lines))
+            except (subprocess.CalledProcessError, RuntimeError) as e:
+                print(f"warning: update-branch step failed: {e}")
 
     for project, result in shadow_lines:
         print(format_shadow(project, a.shadow, result))
@@ -953,6 +1351,7 @@ def main(argv=None):
                 print(f"warning: shadow diff not recorded: {e}")
 
     roles = combine(per_project)
+    roster_rows = roster_rows if roster_rows is not None else []   # every project parked: nobody was read
     budget_left = free_time(bcfg, roles, roster_rows, now, events, budget_left, profiles, a.dry_run)
     print("== why each agent is (not) working")
     for role, st in roles.items():

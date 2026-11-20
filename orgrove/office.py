@@ -13,6 +13,7 @@ import base64
 import html
 import json
 import subprocess
+import sys
 import threading
 import time
 import webbrowser
@@ -21,7 +22,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
-from orgrove import brand, budget, ci, editions, manifest, office_actions, org, stages
+from orgrove import brand, budget, ci, editions, licence, manifest, office_actions, org, outbox, stages
 
 try:   # the publisher's own website panel: left out of a client's copy (bin/package, #159)
     from orgrove import office_waitlist
@@ -35,6 +36,10 @@ try:
     from orgrove import office_news
 except ImportError:
     office_news = None
+try:   # ORGrove Pro only: the Monitoring floor (Floor 2)
+    from orgrove import incidents, monitoring
+except ImportError:
+    incidents = monitoring = None
 FINANCE_ON = editions.has("finance")   # imported lazily below (it imports office)
 
 
@@ -50,20 +55,70 @@ def edition():
     return editions.present()
 
 
+def floor2(serving="both"):
+    """What /api/floor2 answers. A bad config/monitoring.toml is a note, never a crash: Floor 1 keeps working."""
+    try:
+        return incidents.annotate(monitoring.state(monitoring.load(), serving))
+    except (ValueError, OSError) as e:
+        return {"enabled": False, "error": str(e), "why": "config/monitoring.toml has a mistake"}
+
+
+def raise_tickets(every=60, stop=None):
+    """Floor 2's incidents become tickets (orgrove#414). One thread for the whole Office, whatever tabs are open: the screen is
+    not what decides whether somebody is told. Off unless config/monitoring.toml [incidents] says create_tickets or dry_run."""
+    while not (stop and stop.is_set()):
+        try:
+            cfg = monitoring.load()
+            if cfg["enabled"] and (cfg["incidents"]["create_tickets"] or cfg["incidents"]["dry_run"]):
+                for n in incidents.tick(monitoring.state(cfg, "both"), cfg["incidents"], time.time()):
+                    print(f"Floor 2 incident {n['fp']}: {n['state']}: {n['note']}", flush=True)
+        except Exception as e:           # never end the loop: the Office keeps working when GitHub or the config does not
+            print(f"Floor 2 incidents: {type(e).__name__}: {e}", flush=True)
+        (stop.wait if stop else time.sleep)(every)
+
+
+def floor2_target(state):
+    """Where /floor2 takes a person: the Office on Floor 2's own port, or the Office with the CTO upstairs; None = off."""
+    if not state.get("enabled"):
+        return None
+    return f"http://127.0.0.1:{state['port']}/" if state["serve"] == "separate" else "/office3d?floor=2"
+
+
 def pro_only(route):
     """A route of a part this copy doesn't have: (status, body, content type) saying where to get it, else None.
     A person's page gets the Pro page; a call from a page gets a short JSON note. Never a bare 404 (2026-10-31)."""
     if (name := editions.missing_part(route, edition())) is None:
         return None
     part = editions.PARTS[name]
+    lic = editions.unlicensed(name)          # the files are here, the licence doesn't let the part run (#426)
+    if lic and lic.runs:                     # a running licence that doesn't grant this part (Pro, at an Enterprise floor)
+        why = f"Your licence doesn't include it: it is part of ORGrove {part.edition}."
+        action = (f"mailto:{licence.CONTACT}?subject=ORGrove%20{part.edition}", f"Write to {licence.CONTACT}")
+    elif lic:
+        why = f"This copy is ORGrove Pro, but {lic.why}."
+        action = (f"mailto:{licence.CONTACT}?subject=ORGrove%20Pro%20licence", f"Write to {licence.CONTACT}")
+    else:
+        why = "Your copy is ORGrove Community, which has the agents and the Office, but not this."
+        action = part.get()
     if route in part.pages:
         page = (STATIC / "pro.html").read_text()
-        for key, value in (("__PART_NAME__", part.name), ("__PART_ABOUT__", part.about), ("__PRO_URL__", editions.PRO_URL)):
+        for key, value in (("__PART_NAME__", part.name), ("__PART_ABOUT__", part.about), ("__PART_WHY__", why),
+                           ("__ACTION_URL__", action[0]), ("__ACTION_TEXT__", action[1]), ("__EDITION__", part.edition)):
             page = page.replace(key, html.escape(value))
         return 200, page, "text/html; charset=utf-8"
-    note = {"error": f"{part.name}: part of ORGrove Pro, which this copy (ORGrove Community) doesn't have",
-            "pro": editions.PRO_URL}
+    if lic:
+        note = {"error": f"{part.name}: {lic.why}", "licence": lic.state, "contact": licence.CONTACT}
+    else:
+        note = {"error": f"{part.name}: part of ORGrove {part.edition}, which this copy (ORGrove Community) doesn't have",
+                "pro": part.get()[0]}
     return 404, json.dumps(note), "application/json"
+
+
+def licence_banner():
+    """What /api/licence answers: a line the Office shows at the top when the licence needs attention, else none."""
+    st = licence.status()
+    show = st.state in ("grace", "expired", "missing", "invalid", "early")
+    return {"state": st.state, "show": show and any(editions.installed(p) for p in editions.PARTS), "line": st.why}
 
 
 def people():
@@ -80,9 +135,23 @@ BOARD_CACHE_SECONDS = 300   # the project board is the expensive GraphQL read; d
 _board_cache = {}
 
 
+class GhMissing(Exception):
+    """The GitHub CLI is not on this computer: say so in plain words, never as a Python traceback line."""
+
+
+def explain(exc):
+    """The one line the page shows for a failed read: gh's own words when it has them, plain words when gh is missing."""
+    if isinstance(exc, GhMissing):
+        return str(exc)
+    return f"{type(exc).__name__}: {getattr(exc, 'stderr', '') or exc}".strip()
+
+
 def gh_json(*args):
     try:
         out = subprocess.run(["gh", *args], check=True, capture_output=True, text=True).stdout
+    except FileNotFoundError:
+        raise GhMissing("The GitHub CLI (gh) is not installed on this computer. Install it from https://cli.github.com, "
+                        "run `gh auth login`, then reload this page.") from None
     except subprocess.CalledProcessError as e:
         # gh's own message (502, rate limit, not found) is otherwise lost in CI tracebacks (#125).
         e.add_note(f"gh said: {(e.stderr or '').strip()[:500] or '(nothing on stderr)'}")
@@ -90,8 +159,40 @@ def gh_json(*args):
     return json.loads(out) if out.strip() else []
 
 
+def issue_comments(repo, n, gh=None, since=""):
+    """Every comment on an issue or PR, oldest first. Never one page: #667 had 470 comments and its newest verdicts
+    were on page 5, so the dispatcher saw no review and sent QA and Security back to the same head 61 times
+    ($7.52 of the $20 top-up on 2026-11-03, L-017). tests/test_pagination.py keeps every comment read on this path."""
+    q = f"since={since}&" if since else ""
+    pages = (gh or gh_json)("api", f"repos/{repo}/issues/{n}/comments?{q}per_page=100", "--paginate", "--slurp")
+    return [c for page in pages or [] for c in page]
+
+
+SPEND_EVENTS = ("reserve", "cost", "refused")
+
+
+def spend_feed(events, n=40):
+    """The spend log: money events only, newest first. The ledger also holds other events (status ticks,
+    update_branch since 2026-11-02) with no issue or amount: they broke the 2D view (owner, 2026-11-03)."""
+    return sorted((e for e in events if e["type"] in SPEND_EVENTS), key=lambda e: e["ts"], reverse=True)[:n]
+
+
+def ledger_months(months):
+    """Those of `months` ('YYYY-MM') the ledger has event files for: one listing, not one per month."""
+    try:
+        names = {f["name"][:7] for f in gh_json("api", f"repos/{ORGROVE_REPO}/contents/events?ref=ledger")}
+    except subprocess.CalledProcessError:
+        return []
+    return [m for m in months if m in names]
+
+
 def ledger_events(month):
-    """Every event in this month's ledger files."""
+    """Every event in this month's ledger files.
+
+    Each file is read as a git blob by its sha (up to 100 MB). The contents API returns no content for a file over
+    1 MB: on 2026-11-03 a loop of refused runs grew the day's file to 1.1 MB, the dispatcher saw no events for the day
+    (no refusal, so no pause; $0 spent, so no daily cap) and kept starting runs. A file that has bytes but decodes to
+    nothing raises: an unknown spend must stop the dispatcher, never read as $0."""
     try:
         files = gh_json("api", f"repos/{ORGROVE_REPO}/contents/events?ref=ledger")
     except subprocess.CalledProcessError:
@@ -99,8 +200,11 @@ def ledger_events(month):
     events = []
     for f in files:
         if f["name"].startswith(month) and f["name"].endswith(".jsonl"):
-            blob = gh_json("api", f"repos/{ORGROVE_REPO}/contents/{f['path']}?ref=ledger")
-            text = base64.b64decode(blob["content"]).decode()
+            blob = gh_json("api", f"repos/{ORGROVE_REPO}/git/blobs/{f['sha']}")
+            text = base64.b64decode(blob.get("content") or "").decode()
+            if f.get("size") and not text.strip():
+                raise RuntimeError(f"ledger file {f['path']} has {f['size']} bytes but read as empty "
+                                   f"(encoding {blob.get('encoding')!r}); refusing to count today's spend as $0")
             events += [json.loads(line) for line in text.splitlines() if line.strip()]
     return events
 
@@ -182,7 +286,13 @@ def pipeline(repo, cfg, board=None, skip=()):
     stage_labels = [s["label"] for s in cfg["stage"]] + [stages.DONE_LABEL]
     since = (datetime.now(timezone.utc) - timedelta(days=7)).date().isoformat()
     fields = "number,title,labels,state,url,updatedAt,closedAt,milestone"
-    active = gh_json("issue", "list", "-R", repo, "--state", "open", "--limit", "500", "--json", fields)
+    try:       # gh grew a `parent` field after the 2.40 the installer accepts: without it no issue is taken for a sub-issue
+        active = gh_json("issue", "list", "-R", repo, "--state", "open", "--limit", "500", "--json", fields + ",parent")
+        fields += ",parent"
+    except subprocess.CalledProcessError as e:
+        if "Unknown JSON field" not in (e.stderr or ""):
+            raise
+        active = gh_json("issue", "list", "-R", repo, "--state", "open", "--limit", "500", "--json", fields)
     done = gh_json("issue", "list", "-R", repo, "--state", "closed", "--limit", "50", "--json", fields,
                    "--search", f"label:{','.join(stage_labels)} closed:>={since}")
     cards = []
@@ -203,6 +313,7 @@ def pipeline(repo, cfg, board=None, skip=()):
             "priority": next((n.split("/")[1] for n in names if n.startswith("priority/")), ""),
             "updated": i["closedAt"] or i["updatedAt"],
             "milestone": (i.get("milestone") or {}).get("title"),
+            "parent": (i.get("parent") or {}).get("number"),
             "target": b.get("target"), "start": b.get("start"), "board_status": b.get("status"),
             "on_board": bool(b),
         })
@@ -262,26 +373,64 @@ def inbox(repo):
     for i in gh_json("issue", "list", "-R", repo, "--state", "open", "--search", "label:needs/human,blocked/budget",
                      "--json", "number,title,url,labels", "--limit", "50"):
         kind = "budget" if any(label["name"] == "blocked/budget" for label in i["labels"]) else "decision"
-        comments = gh_json("api", f"repos/{repo}/issues/{i['number']}/comments?per_page=100")
-        asks = [c for c in comments if c["user"]["login"] == org.BOT_LOGIN]
+        comments = issue_comments(repo, i["number"])
+        asks = [c["body"] or "" for c in comments if c["user"]["login"] == org.BOT_LOGIN]
+        # The Delivery Lead's question in full (it is written to be read alone), else the newest bot comment
+        question = next((b for b in reversed(asks) if outbox.is_owner_question(b)), asks[-1] if asks else "")
         items.append({"kind": kind, "number": i["number"], "title": i["title"], "url": i["url"], "repo": repo,
-                      "question": (asks[-1]["body"][:600] if asks else ""),
+                      "question": question[:4000], "later": kind == "decision" and outbox.is_later(question),
                       "answered": bool(comments) and comments[-1]["user"]["login"] != org.BOT_LOGIN})
     return items
 
 
-def roster(dept, cards, run_rows, project=None):
+LIVE = ("in_progress", "queued", "waiting")
+# An agent/<role> label without a live run on its ticket is believed this long after the ticket last changed: the
+# label is added inside the run, so a run the run list hasn't shown yet is covered. After that it is stale.
+LABEL_GRACE_MIN = 15
+
+
+def _labelled(dept, role, r, cards, project):
+    """Cards carrying this role's agent/<skill> label (the label names the skill; the card's project says which
+    role holds it, #112)."""
+    return [c for c in cards if r["skill"] in c["agents"]
+            and manifest.role_for(dept, r["skill"], c.get("project") or project) == role]
+
+
+def _label_held(c, live, now):
+    """True when an agent/<role> label on card c still means a run: one is live on the ticket, or the ticket changed
+    within LABEL_GRACE_MIN. A closed ticket's label never does."""
+    if c.get("stage") == "done":
+        return False
+    if any(x["issue"] == c["number"] for x in live):
+        return True
+    updated = c.get("updated")
+    return bool(updated) and now - datetime.fromisoformat(updated.replace("Z", "+00:00")) < timedelta(minutes=LABEL_GRACE_MIN)
+
+
+def stale_labels(dept, cards, run_rows, project=None, now=None):
+    """[(issue, skill)] for agent/<skill> labels no run holds: a run that ended without removing its label
+    (2026-11-03..05: Security on #667 and the Delivery Lead on orgrove#262 looked busy for two days and took no work).
+    The dispatcher removes them."""
+    now = now or datetime.now(timezone.utc)
+    out = []
+    for role, r in dept["roles"].items():
+        live = [x for x in run_rows if x["role"] == role and x["status"] in LIVE]
+        out += [(c["number"], r["skill"]) for c in _labelled(dept, role, r, cards, project) if not _label_held(c, live, now)]
+    return out
+
+
+def roster(dept, cards, run_rows, project=None, now=None):
     """Each role is working (a run in progress) or on a coffee break since its last run finished.
 
-    Derived only from GitHub runs and agent/<role> labels, the same data the dispatcher (#7) uses.
+    Derived only from GitHub runs and agent/<role> labels, the same data the dispatcher (#7) uses. A label counts
+    only while a run holds it (_label_held): a label left behind must not keep the role "working" for days.
     """
+    now = now or datetime.now(timezone.utc)
     default_break = dept.get("break_min", 0)
     out = []
     for role, r in dept["roles"].items():
-        live = [x for x in run_rows if x["role"] == role and x["status"] in ("in_progress", "queued", "waiting")]
-        # agent/<skill> labels name the skill; the card's project says which role holds it (#112)
-        labelled = [c for c in cards if r["skill"] in c["agents"]
-                    and manifest.role_for(dept, r["skill"], c.get("project") or project) == role]
+        live = [x for x in run_rows if x["role"] == role and x["status"] in LIVE]
+        labelled = [c for c in _labelled(dept, role, r, cards, project) if _label_held(c, live, now)]
         finished = [x["updated"] for x in run_rows if x["role"] == role and x["status"] == "completed"]
         on = {(c.get("project"), c["number"]): {"number": c["number"], "url": c["url"], "title": c["title"],
                                                 "project": c.get("project")} for c in labelled}
@@ -315,10 +464,13 @@ REASON_TEXT = {
     "waiting_owner": "waiting on you", "waiting_agent": "waiting on another agent",
     "nothing_to_do": "nothing planned for this role", "unknown": "no status recorded yet",
     "provider_refused": "the AI provider is refusing runs",
+    "loop_stopped": "stopped: going round in a circle on one ticket",
+    "outbox_refused": "stopped: its last two results were refused, so nothing changed",
+    "parked": "parked: this project is worked in your session",
 }
 # When the whole team is between tasks, the status leads with what the CTO can act on or should know first.
-IMPACT = ["provider_refused", "budget_monthly", "budget_daily", "waiting_owner", "stale", "waiting_wakeup", "on_break",
-          "waiting_agent", "nothing_to_do", "unknown"]
+IMPACT = ["provider_refused", "loop_stopped", "outbox_refused", "budget_monthly", "budget_daily", "waiting_owner", "stale", "waiting_wakeup", "on_break",
+          "waiting_agent", "nothing_to_do", "parked", "unknown"]
 
 
 def why(events, now, roster_rows):
@@ -370,7 +522,7 @@ def snapshot(project=None):
     events = ledger_events(day[:7])
     today, month = budget.spent(events, day)
     run_rows = runs(events)
-    feed = sorted((e for e in events if e["type"] != "status"), key=lambda e: e["ts"], reverse=True)[:40]
+    feed = spend_feed(events)
     all_cards, inbox_items, projects, dept, cfg = [], [], [], None, None
     for prof in profiles:
         dept = manifest.department(prof["departments"][0])
@@ -397,7 +549,9 @@ def snapshot(project=None):
         "why": why(events, datetime.now(timezone.utc), team),
         "spend": {"day": day, "today": today, "daily_cap": bcfg["daily_usd"], "month": month,
                   "monthly_cap": bcfg["monthly_usd"], "by_role": spend_today_by_role(events, day)},
-        "inbox": inbox_items,
+        # A no-rush question waits in "later": every count of what is waiting on the owner reads "inbox" (2026-11-02)
+        "inbox": [i for i in inbox_items if not i.get("later")],
+        "later": [i for i in inbox_items if i.get("later")],
         "runs": run_rows,
         "feed": feed,
         "ledger_url": f"https://github.com/{ORGROVE_REPO}/tree/ledger/events",
@@ -480,7 +634,7 @@ class Cache:
                     self.log = (self.log + changes(self.data, fresh))[-CHANGES_KEPT:]
                     self.data, self.at = fresh | {"changes": self.log}, now
                 except Exception as exc:
-                    err = f"{type(exc).__name__}: {getattr(exc, 'stderr', '') or exc}".strip()
+                    err = explain(exc)
                     if self.data is None:
                         return {"error": err}
                     # Keep the last good picture, marked stale, rather than blanking the page.
@@ -493,9 +647,11 @@ class Cache:
 PAGES = {"/": "index.html", "/index.html": "index.html", "/office3d": "office3d.html", "/office3d.html": "office3d.html",
          "/finance": "finance.html", "/finance.html": "finance.html", "/meeting": "meeting.html",
          "/meeting.html": "meeting.html", "/waitlist": "waitlist.html", "/waitlist.html": "waitlist.html",
-         "/preview3d": "preview3d.html", "/preview3d.html": "preview3d.html"}
+         "/preview3d": "preview3d.html", "/preview3d.html": "preview3d.html",
+         "/floor2": "floor2.html", "/floor2.html": "floor2.html"}
 STATIC_TYPES = {".html": "text/html; charset=utf-8", ".js": "text/javascript; charset=utf-8", ".png": "image/png", "": "text/plain; charset=utf-8",
-                ".glb": "model/gltf-binary", ".gltf": "model/gltf+json", ".bin": "application/octet-stream"}   # 3D models (Office3D preview)
+                ".glb": "model/gltf-binary", ".gltf": "model/gltf+json", ".bin": "application/octet-stream",   # 3D models (Office3D preview)
+                ".jpg": "image/jpeg"}   # the film room's textures: separate files, since the page's policy blocks blob: images
 
 
 LIGHT_PAGES = ("office3d.html", "preview3d.html")
@@ -515,7 +671,16 @@ def static_file(url_path):
     return target.read_bytes(), ctype
 
 
-MEETING = meeting.Meeting() if meeting else None
+def _books():
+    """The Finance report as text for Finance in a meeting (meeting.Meeting.books); None when it can't be read."""
+    fin = FINANCE.get() if FINANCE_ON else None
+    if not fin or "error" in fin:
+        return None
+    from orgrove import finance  # imports office; loaded lazily to avoid a cycle
+    return finance.report(fin)
+
+
+MEETING = meeting.Meeting(books=_books) if meeting else None
 
 
 class FinanceCache:
@@ -531,7 +696,7 @@ class FinanceCache:
                     self.data, self.at = finance.gather(), time.time()
                 except Exception as exc:
                     self.at = time.time()
-                    err = f"{type(exc).__name__}: {getattr(exc, 'stderr', '') or exc}".strip()
+                    err = explain(exc)
                     return {"error": err} if self.data is None else self.data | {"stale": err}
             return self.data
 
@@ -550,9 +715,21 @@ def make_handler(cache, brand_cfg=None):
                 return
             if (pro := pro_only(route)) is not None:
                 return self._send(*pro)
-            if self.path.startswith("/api/state"):
+            serving = getattr(self.server, "serving", "both")
+            if route in ("/floor2", "/floor2.html") and (go := floor2_target(floor2(serving))) is not None:
+                self.send_response(302)      # on: take the person there; off: the page below says how to turn it on
+                self.send_header("Location", go)
+                self.end_headers()
+                return
+            if serving == "floor2" and route in ("/", "/index.html", "/office3d", "/office3d.html"):
+                route = "/office3d"          # the Office on Floor 2's own port opens straight into the monitoring floor
+            if self.path.startswith("/api/floor2"):
+                body, ctype = json.dumps(floor2(serving)).encode(), "application/json"
+            elif self.path.startswith("/api/state"):
                 live = {"meeting": MEETING.public()} if MEETING else {}
                 body, ctype = json.dumps(cache.get() | live | {"people": people()}).encode(), "application/json"
+            elif self.path.startswith("/api/licence"):
+                body, ctype = json.dumps(licence_banner()).encode(), "application/json"
             elif self.path.startswith("/api/edition"):
                 body, ctype = json.dumps(edition()).encode(), "application/json"
             elif self.path.startswith("/api/meeting"):
@@ -690,7 +867,10 @@ def make_handler(cache, brand_cfg=None):
                     if fin and "error" not in fin:
                         from orgrove import finance  # imports office; loaded lazily to avoid a cycle
                         fin_text = finance.report(fin)
-                    out = MEETING.start(text, cache.get(), kind, fin_text)
+                    invite = req.get("invite") or []
+                    if not isinstance(invite, list) or not all(isinstance(x, str) for x in invite) or len(invite) > 4:
+                        raise office_actions.Refused("invite must be a short list of participant ids")
+                    out = MEETING.start(text, cache.get(), kind, fin_text, invite=invite)
                 elif op == "say":
                     out = MEETING.say(text)
                 elif op == "wrap":
@@ -719,6 +899,19 @@ def make_handler(cache, brand_cfg=None):
     return Handler
 
 
+
+class OfficeServer(ThreadingHTTPServer):
+    """The default listen backlog is 5: a page that asks for fifty textures at once had some connections reset, and the
+    Office came up in its plain fallback look (seen 2026-11-06). A larger backlog queues them instead."""
+    request_queue_size = 128
+
+    def handle_error(self, request, client_address):
+        """A browser that reloads or closes the tab drops the files it was still fetching: a broken pipe or a reset
+        connection is its doing, not a fault, and printed a full traceback for each (owner, 2026-11-09). Anything else still prints."""
+        if isinstance(sys.exc_info()[1], (BrokenPipeError, ConnectionResetError, ConnectionAbortedError)):
+            return
+        super().handle_error(request, client_address)
+
 def main(argv=None):
     p = argparse.ArgumentParser(prog="orgrove-office")
     p.add_argument("--project", help="one project only (default: all projects)")
@@ -726,15 +919,27 @@ def main(argv=None):
     p.add_argument("--no-browser", action="store_true")
     a = p.parse_args(argv)
     handler = make_handler(Cache(a.project))
+    serving = "both"
+    if monitoring is not None:    # Floor 2 on its own port too, when config/monitoring.toml says so
+        f2 = floor2("floor2")
+        if f2.get("enabled") and f2["serve"] == "separate":
+            serving = "floor1"
+            second = OfficeServer(("127.0.0.1", f2["port"]), handler)
+            second.serving = "floor2"
+            threading.Thread(target=second.serve_forever, daemon=True).start()
+            print(f"ORGrove Floor 2 on http://127.0.0.1:{f2['port']}/", flush=True)
     for port in range(a.port, a.port + 10):  # take the next free port if this one is in use
         try:
-            server = ThreadingHTTPServer(("127.0.0.1", port), handler)
+            server = OfficeServer(("127.0.0.1", port), handler)
+            server.serving = serving
             break
         except OSError:
             continue
     else:
         raise SystemExit(f"no free port in {a.port}-{a.port + 9}")
     url = f"http://127.0.0.1:{port}/"
+    if monitoring is not None:
+        threading.Thread(target=raise_tickets, daemon=True).start()
     print(f"ORGrove Office on {url}  (Ctrl+C to stop)", flush=True)
     if not a.no_browser:
         webbrowser.open(url)

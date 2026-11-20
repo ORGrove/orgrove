@@ -25,7 +25,10 @@ def resolve(project, role, mode="ticket"):
     if name is None:
         raise SystemExit(f"no role serves {role} for project {project}")
     r = dept["roles"][name]
-    if r.get("runs_commands"):  # the project's own test/contract programs (validated in manifest.validate_project)
+    if mode == "pr" and r["skill"] not in ("qa", "security"):   # only reviewers read a PR from outside (#82)
+        raise SystemExit(f"pr mode is for qa and security, not {r['skill']}")
+    # A PR from outside is untrusted: no project programs and no setup, so nothing from its tree runs (#82, #354).
+    if r.get("runs_commands") and mode != "pr":  # the project's own test/contract programs (validated in manifest.validate_project)
         r = r | {"tools": r["tools"] + prof.get("tools", [])}
     if mode == "free_time":
         ft = budget.load()["free_time"]
@@ -41,7 +44,7 @@ def resolve(project, role, mode="ticket"):
         "model": r["model"],
         "ceiling": str(r["ceiling_usd"]),
         "skill": r["skill"],
-        "setup": prof["commands"].get("setup", "true"),
+        "setup": "true" if mode == "pr" else prof["commands"].get("setup", "true"),
         **{f"perm_{k.replace('-', '_')}": v for k, v in TOKEN[r["contents"]].items()},
         # Commenting on a PR needs Pull requests write (probe in orgrove#122: 403 with read, 422 with write).
         # Only the runner posts; the free-time model has Read/Grep/Glob and no shell.
@@ -58,7 +61,7 @@ def main(argv=None):
     p.add_argument("--project", required=True)
     p.add_argument("--role", required=True)
     p.add_argument("--tools-file", required=True)
-    p.add_argument("--mode", choices=["ticket", "free_time"], default="ticket")
+    p.add_argument("--mode", choices=["ticket", "free_time", "pr"], default="ticket")
     a = p.parse_args(argv)
     _, r, out = resolve(a.project, a.role, a.mode)
     with open(a.tools_file, "w") as f:

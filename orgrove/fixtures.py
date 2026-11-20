@@ -3,7 +3,7 @@
     python -m orgrove.fixtures record --project orgrove [--out tests/golden/<name>.json]
 
 Read-only: it reads the same state `dispatch.main()` reads and runs `board_sync()` + `decide()` on it. It never
-calls `execute()`, `record_status()` or a `gh` write. `tests/test_golden.py` replays every fixture and compares.
+calls the Executor, `record_status()` or a `gh` write. `tests/test_golden.py` replays every fixture and compares.
 A fixture holds only what `decide()` and `board_sync()` read: no comment bodies, no env, no ledger events.
 """
 import argparse
@@ -34,6 +34,7 @@ def trim_review(review):
             "rounds": r["rounds"], "open_subs": r["open_subs"], "ci": r["ci"],
             "ci_failing": [list(x) for x in r["ci_failing"]], "ci_bounces": r["ci_bounces"],
             "ci_kicks": r["ci_kicks"], "head_age_min": round(r["head_age_min"], 1), "granted": r["granted"],
+            "since": r.get("since"),
         }
     return out
 
@@ -68,9 +69,7 @@ def gather(prof):
     bcfg = budget.load()
     day = datetime.now(ZoneInfo(bcfg["timezone"])).date().isoformat()
     events = office.ledger_events(day[:7])
-    spent_today, spent_month = budget.spent(events, day)
-    budget_left = min(bcfg["daily_usd"], bcfg["monthly_usd"] - spent_month + spent_today) - spent_today
-    budget_kind = "monthly" if bcfg["monthly_usd"] - spent_month < bcfg["daily_usd"] - spent_today else "daily"
+    budget_left, budget_kind = budget.left(bcfg, events, day, prof["repo"])
     now = datetime.now(timezone.utc)
     dept = manifest.department(prof["departments"][0])
     cfg = stages.load(manifest.ROOT / dept["stages"])
@@ -87,6 +86,8 @@ def gather(prof):
     env = (prof.get("environments") or {}).get("dev")
     deploys = dispatch.deploy_states(repo, env["deployed_by"], merged, now, known_failing=env.get("known_failing", ())) \
         if env and merged else {}
+    holds = dispatch.owner_holds(repo, cards, owners)
+    pm_seen = dispatch.pm_last_runs(events, repo)
     return {
         "dept": trim_dept(dept), "cfg": trim_cfg(cfg),
         "cards": [trim_card(c) for c in cards],
@@ -100,9 +101,19 @@ def gather(prof):
         "now": now.isoformat(timespec="seconds"), "spent_today": 0.0, "daily_cap": budget_left,
         "focus": prof.get("milestone_focus"), "roadmap_request": roadmap_request,
         "has_env": bool(prof.get("environments")),
-        "answered": sorted(dispatch.answered_issues(repo, cards, owners)),
+        "answered": sorted(holds[0]), "unvetted": sorted(holds[1]),
+        "delivery_tries": {str(n): k for n, k in dispatch.delivery_tries(events, day, repo).items()},
+        "plan_tries": {str(n): k for n, k in dispatch.role_tries(events, day, repo, "pm").items()},
+        "pm_seen": {str(n): t for n, t in pm_seen.items()},
+        "pm_touched": sorted(dispatch.pm_changes(repo, cards, pm_seen, owners)),
+        "paid_runs": [[n, role, k] for (n, role), k in sorted(dispatch.paid_runs(events, day, repo).items())],
+        "review_paid": [[n, role, ts] for (n, role), ts in sorted(dispatch.review_paid(events, repo).items())],
         "budget_kind": budget_kind,
+        "external_prs": bool((prof.get("review") or {}).get("external_prs")),
+        "pr_reviews": dispatch.external_pr_reviews(prof),
         "sanity_passed": sorted(dispatch.sanity_passes(repo, cards)),
+        "sanity_failed": sorted(dispatch.sanity_fails(repo, cards)),
+        "outbox_stuck": [[n, role, reasons] for (n, role), reasons in sorted(dispatch.outbox_refusals(events, day, repo).items())],
         "refused": dispatch.provider_refusal(events, now),
         "deploys": {str(n): trim_deploy(d) for n, d in deploys.items()},
         "awaiting_ci": {str(n): trim_awaiting(a) for n, a in dispatch.awaiting_pr_ci(repo, cards, owners).items()},
@@ -121,11 +132,19 @@ def replay(inputs):
         i["dept"], i["cfg"], cards, i["roster_rows"], {int(n): r for n, r in i["review"].items()}, set(i["merged"]),
         [by_number[n] for n in i["backlog"]], datetime.fromisoformat(i["now"]), i["spent_today"], i["daily_cap"],
         focus=i["focus"], roadmap_request=i["roadmap_request"], has_env=i["has_env"], answered=set(i["answered"]),
-        explain=explain, budget_kind=i["budget_kind"], sanity_passed=set(i["sanity_passed"]), refused=i["refused"],
+        explain=explain, budget_kind=i["budget_kind"], sanity_passed=set(i["sanity_passed"]), sanity_failed=set(i.get("sanity_failed", [])),
+        outbox_stuck={(n, role): reasons for n, role, reasons in i.get("outbox_stuck", [])}, refused=i["refused"],
         deploys={int(n): d for n, d in i["deploys"].items()},
         awaiting_ci={int(n): a for n, a in i["awaiting_ci"].items()},
-        deps={int(n): w for n, w in i["deps"].items()}, project=i.get("project"))
-    return {"actions": actions, "explain": explain}
+        deps={int(n): w for n, w in i["deps"].items()}, project=i.get("project"),
+        unvetted=set(i.get("unvetted", [])),   # fixtures recorded before the Delivery Lead (2026-11-02) carry neither
+        delivery_tries={int(n): k for n, k in i.get("delivery_tries", {}).items()},
+        plan_tries={int(n): k for n, k in i.get("plan_tries", {}).items()},
+        pm_seen={int(n): t for n, t in i.get("pm_seen", {}).items()}, pm_touched=set(i.get("pm_touched", [])),   # fixtures recorded before #77 carry none
+        paid_runs={(n, role): k for n, role, k in i.get("paid_runs", [])},   # absent before L-018 (2026-11-04)
+        review_paid={(n, role): ts for n, role, ts in i.get("review_paid", [])},   # absent before L-019 (2026-11-05)
+        external_prs=i.get("external_prs", False), pr_reviews=i.get("pr_reviews", []))   # the PR-review keys: before #82
+    return {"actions": [a.to_dict() for a in actions], "explain": explain}
 
 
 def fixture(name, source, note, inputs):

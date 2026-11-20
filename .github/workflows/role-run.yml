@@ -8,7 +8,7 @@ on:
     inputs:
       role:
         type: choice
-        options: [pm, dev, qa, security, devops, sanity, gate]
+        options: [pm, dev, qa, security, devops, sanity, delivery, gate]
         required: true
       issue:
         type: number
@@ -30,10 +30,15 @@ concurrency:
 env:
   CLAUDE_CODE_VERSION: "2.1.296"
 jobs:
-  run:
+  # Job 1: the privileged side before the model: the gate role, the budget reservation, the activity label.
+  # The model never runs here. Its outputs (run id, settings) are plain strings for the next jobs.
+  reserve:
     if: vars.ORGROVE_ENABLED == 'true'
     runs-on: ubuntu-latest
-    timeout-minutes: 45
+    timeout-minutes: 10
+    outputs:
+      run_id: ${{ steps.reserve.outputs.run_id }}
+      go: ${{ steps.reserve.outcome == 'success' && inputs.role != 'gate' }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
@@ -49,7 +54,7 @@ jobs:
           role="${{ inputs.role }}"; [ "$role" = gate ] && role=qa
           python -m orgrove.runcfg --project "${{ inputs.project }}" --role "$role" --mode "${{ inputs.mode }}" --tools-file "$RUNNER_TEMP/tools.txt" >> "$GITHUB_OUTPUT"
 
-      - name: Role token (scoped to this role)
+      - name: Role token (the tracker side, with issues and pull requests write)
         id: tok
         uses: actions/create-github-app-token@64ab729a6294000f5aa4a4bc0b73d1f32bc45510 # v3.3.0
         with:
@@ -106,8 +111,54 @@ jobs:
           fi
           exit "$rc"
 
+      - name: Mark the issue active
+        if: inputs.role != 'gate' && steps.reserve.outcome == 'success'
+        env:
+          GH_TOKEN: ${{ steps.tok.outputs.token }}
+        run: gh issue edit "${{ inputs.issue }}" -R "${{ steps.cfg.outputs.repo }}" --add-label "agent/${{ inputs.role }}" || true
+
+
+  # Job 2: the model. Its token reads the ticket and the code and can push a branch (Dev); it cannot comment,
+  # label, create issues or touch a PR. What the agent wants done goes in orgrove-out/result.json (#41).
+  agent:
+    needs: reserve
+    if: vars.ORGROVE_ENABLED == 'true' && needs.reserve.outputs.go == 'true'
+    permissions:
+      contents: read   # the job's own GITHUB_TOKEN: no issues or pull-requests write
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    outputs:
+      rc: ${{ steps.agent.outputs.rc }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.12"
+      - name: Install settings (config/org.toml, #159)
+        id: org
+        run: python -m orgrove.org >> "$GITHUB_OUTPUT"
+
+      - name: Resolve role settings
+        id: cfg
+        run: |
+          role="${{ inputs.role }}"; [ "$role" = gate ] && role=qa
+          python -m orgrove.runcfg --project "${{ inputs.project }}" --role "$role" --mode "${{ inputs.mode }}" --tools-file "$RUNNER_TEMP/tools.txt" >> "$GITHUB_OUTPUT"
+
+      - name: Read-only token (read-only App, docs/runbooks/read-only-app.md; the doctor check holds the agent job to it)
+        id: tok
+        uses: actions/create-github-app-token@64ab729a6294000f5aa4a4bc0b73d1f32bc45510 # v3.3.0
+        with:
+          app-id: ${{ vars.ORGROVE_READ_APP_ID }}
+          private-key: ${{ secrets.ORGROVE_READ_APP_PRIVATE_KEY }}
+          owner: ${{ steps.cfg.outputs.repo_owner }}
+          repositories: ${{ steps.cfg.outputs.repo_name }}
+          permission-contents: ${{ steps.cfg.outputs.perm_contents }}
+          permission-issues: read
+          permission-pull-requests: read
+          permission-actions: read
+          permission-checks: read
+
       - name: Check out the project
-        if: inputs.role != 'gate'
         env:
           TOK: ${{ steps.tok.outputs.token }}
           BOT_LOGIN: ${{ steps.org.outputs.bot_login }}
@@ -119,7 +170,6 @@ jobs:
           cd work && ${{ steps.cfg.outputs.setup }}
 
       - name: Prepare inputs (reviewers get ticket body + diff only)
-        if: inputs.role != 'gate'
         id: inputs
         env:
           GH_TOKEN: ${{ steps.tok.outputs.token }}
@@ -149,14 +199,20 @@ jobs:
               '[.[] | select(.user.login==env.BOT_LOGIN) | select(.body|test("orgrove:verdict")) | select(.body|test("\"role\":\\s*\"${{ inputs.role }}\""))] | length')
             extra=(--head "$head" --diff-file "$RUNNER_TEMP/review.diff" --round "$((prev + 1))")
           fi
+          # PM, Dev and DevOps get the ticket brief (ticket_brief: owner words verbatim, latest reviews and handoffs)
+          # instead of reading the whole thread. No brief (a read failed) = the run reads the thread as before.
+          : > "$RUNNER_TEMP/brief.md"
+          case "${{ inputs.role }}" in dev|devops|pm*) python -m orgrove.ticket_brief --repo "$repo" --issue "$n" > "$RUNNER_TEMP/brief.md" || : ;; esac
+          wc -c "$RUNNER_TEMP/brief.md"
+          # The part that is the same every run (profile, lessons, project map) goes to the system prompt, where the
+          # prompt cache keeps it between runs; only the target, date, run URL and a reviewer's diff are per run.
           python -m orgrove.prompt --project "${{ inputs.project }}" --role "${{ inputs.role }}" --issue "$n" \
-            --body-file "$RUNNER_TEMP/body.md" \
-            --run-url "${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}" "${extra[@]}" \
+            --body-file "$RUNNER_TEMP/body.md" --workdir work --stable-out "$RUNNER_TEMP/stable.md" --brief-file "$RUNNER_TEMP/brief.md" \
+            --run-url "${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}" --outbox "${extra[@]}" \
             > "$RUNNER_TEMP/prompt.md"
           wc -c "$RUNNER_TEMP/prompt.md"
 
       - name: Install Claude Code and the role instructions
-        if: inputs.role != 'gate'
         env:
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
         run: |
@@ -167,7 +223,7 @@ jobs:
           if [ "${{ inputs.mode }}" = free_time ]; then
             cp skills/${{ steps.cfg.outputs.skill }}/FREE_TIME.md "$RUNNER_TEMP/role.md"
           else
-            cat skills/${{ steps.cfg.outputs.skill }}/SKILL.md skills/VERDICT.md > "$RUNNER_TEMP/role.md"
+            cat skills/${{ steps.cfg.outputs.skill }}/SKILL.md skills/VERDICT.md "$RUNNER_TEMP/stable.md" > "$RUNNER_TEMP/role.md"
           fi
           # The key reaches Claude Code through a helper, never the environment: the project's
           # docker-compose.yml forwards ANTHROPIC_API_KEY from the shell into test containers.
@@ -179,13 +235,12 @@ jobs:
 
       - name: Run the agent
         # Free time with nothing left to look at: no model call at all (settles at $0).
-        if: inputs.role != 'gate' && steps.inputs.outputs.count != '0'
+        if: steps.inputs.outputs.count != '0'
         id: agent
         env:
           GH_TOKEN: ${{ steps.tok.outputs.token }}
           REPO: ${{ steps.cfg.outputs.repo }}
         run: |
-          gh issue edit "${{ inputs.issue }}" -R "$REPO" --add-label "agent/${{ inputs.role }}" || true
           mapfile -t TOOLS < "$RUNNER_TEMP/tools.txt"
           cd work
           set +e
@@ -202,45 +257,151 @@ jobs:
             --allowedTools "${TOOLS[@]}" < "$RUNNER_TEMP/prompt.md" > "$RUNNER_TEMP/result.json"
           echo "rc=$?" >> "$GITHUB_OUTPUT"
 
-      - name: Free time — post the findings (only on the PRs the runner gathered)
-        if: inputs.mode == 'free_time' && steps.agent.outputs.rc == '0'
+      - name: Check the result before finishing (a refused result is corrected in the same session)
+        # The model's own result is checked with the function the apply job uses, a dry run that only reads. If it would be
+        # refused, the model is resumed in its own session with the exact reasons (at most twice, on a small budget of its
+        # own) and the corrections' cost is added to the run's. It sees only the validator's message about its own output.
+        # It can never stop a run: on any failure the apply job decides, as before (L-021).
+        if: steps.inputs.outputs.count != '0' && inputs.mode != 'free_time' && steps.agent.outputs.rc == '0'
+        continue-on-error: true
         env:
           GH_TOKEN: ${{ steps.tok.outputs.token }}
         run: |
-          python -m orgrove.freetime post --repo "${{ steps.cfg.outputs.repo }}" --issue "${{ inputs.issue }}" \
-            --targets "$RUNNER_TEMP/targets.json" --result "$RUNNER_TEMP/result.json" \
-            --run-url "${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+          python -m orgrove.selfcheck --project "${{ inputs.project }}" --role "${{ inputs.role }}" --issue "${{ inputs.issue }}" \
+            --workdir work --result "$RUNNER_TEMP/result.json" --ceiling "${{ steps.cfg.outputs.ceiling }}" \
+            --model "${{ steps.cfg.outputs.model }}" --tools-file "$RUNNER_TEMP/tools.txt" --role-file "$RUNNER_TEMP/role.md"
 
-      - name: Settle real cost
-        if: always() && steps.reserve.outcome == 'success'
-        env:
-          ORGROVE_LEDGER_DIR: ${{ runner.temp }}/ledger
+      - name: Collect the outbox (outside the checkout, so it can never be committed)
+        if: always()
         run: |
-          cost=$(python -c "import json,sys; print(json.load(open(sys.argv[1])).get('total_cost_usd',''))" "$RUNNER_TEMP/result.json" 2>/dev/null || true)
-          if [ "${{ steps.agent.outcome }}" = skipped ] || [ -z "${{ steps.agent.outcome }}" ]; then
-            # The model was never called (a step before the agent failed), so the true cost is $0.
-            python -m orgrove.cli settle --run-id "${{ steps.reserve.outputs.run_id }}" --usd 0
-          elif [ -n "$cost" ]; then
-            # A provider refusal (usage limit, bad key) is recorded so the dispatcher pauses and says why.
-            err=$(python -m orgrove.agent_result "$RUNNER_TEMP/result.json" --refusal 2>/dev/null || true)
-            python -m orgrove.cli settle --run-id "${{ steps.reserve.outputs.run_id }}" --usd "$cost" --error "$err"
+          mkdir -p "$RUNNER_TEMP/handoff"
+          cp "$RUNNER_TEMP/result.json" "$RUNNER_TEMP/handoff/" 2>/dev/null || true
+          cp -r work/orgrove-out "$RUNNER_TEMP/handoff/orgrove-out" 2>/dev/null || true
+
+      - name: Hand the outbox to the apply job
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: outbox
+          path: ${{ runner.temp }}/handoff
+          if-no-files-found: ignore
+
+
+  # Job 3: a fresh runner. It mints the scoped tracker token, applies what the role may do, settles the cost.
+  # The only job that writes to the ledger after the reservation.
+  apply:
+    needs: [reserve, agent]
+    if: always() && vars.ORGROVE_ENABLED == 'true' && needs.reserve.outputs.go == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.12"
+      - name: Install settings (config/org.toml, #159)
+        id: org
+        run: python -m orgrove.org >> "$GITHUB_OUTPUT"
+
+      - name: Resolve role settings
+        id: cfg
+        run: |
+          role="${{ inputs.role }}"; [ "$role" = gate ] && role=qa
+          python -m orgrove.runcfg --project "${{ inputs.project }}" --role "$role" --mode "${{ inputs.mode }}" --tools-file "$RUNNER_TEMP/tools.txt" >> "$GITHUB_OUTPUT"
+
+      - name: Role token (the tracker side)
+        id: tok
+        uses: actions/create-github-app-token@64ab729a6294000f5aa4a4bc0b73d1f32bc45510 # v3.3.0
+        with:
+          app-id: ${{ vars.ORGROVE_APP_ID }}
+          private-key: ${{ secrets.ORGROVE_APP_PRIVATE_KEY }}
+          owner: ${{ steps.cfg.outputs.repo_owner }}
+          repositories: ${{ steps.cfg.outputs.repo_name }}
+          permission-contents: ${{ steps.cfg.outputs.perm_contents }}
+          permission-issues: write
+          permission-pull-requests: ${{ inputs.role == 'gate' && 'write' || steps.cfg.outputs.perm_pull_requests }}
+          permission-actions: read
+          permission-checks: read
+          permission-organization-projects: ${{ steps.cfg.outputs.perm_projects }}
+
+      - name: Ledger token
+        if: inputs.role != 'gate'
+        id: ltok
+        uses: actions/create-github-app-token@64ab729a6294000f5aa4a4bc0b73d1f32bc45510 # v3.3.0
+        with:
+          app-id: ${{ vars.ORGROVE_APP_ID }}
+          private-key: ${{ secrets.ORGROVE_APP_PRIVATE_KEY }}
+          repositories: ${{ steps.org.outputs.repo_name }}
+          permission-contents: write
+
+      - name: Fetch the outbox
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        continue-on-error: true
+        with:
+          name: outbox
+          path: ${{ runner.temp }}/in
+
+      - name: Apply the outbox and settle the cost
+        env:
+          LTOK: ${{ steps.ltok.outputs.token }}
+          ORGROVE_LEDGER_DIR: ${{ runner.temp }}/ledger
+          GH_TOKEN: ${{ steps.tok.outputs.token }}   # the ticket's one cost comment (orgrove.ticket_cost); never fails the settle
+        run: |
+          bin/ledger-clone "${{ github.repository }}"
+          in="$RUNNER_TEMP/in"
+          if [ "${{ inputs.mode }}" = free_time ]; then
+            # The targets are gathered here, in the trusted job: the agent job's copy is never read (#259).
+            python -m orgrove.freetime prepare --repo "${{ steps.cfg.outputs.repo }}" --max-prs "${{ steps.cfg.outputs.max_prs }}" \
+              --out "$RUNNER_TEMP/targets.json"
+            python -m orgrove.freetime post --repo "${{ steps.cfg.outputs.repo }}" --issue "${{ inputs.issue }}" \
+              --targets "$RUNNER_TEMP/targets.json" --result "$in/result.json" \
+              --run-url "${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}" || true
+            python -m orgrove.cli settle --run-id "${{ needs.reserve.outputs.run_id }}" --cost "$in/result.json" || true
           else
-            echo "No cost reported: the reservation stays at its full ceiling."
+            # Refused actions are listed in the log and the summary; the cost is settled either way.
+            python -m orgrove.cli apply --project "${{ inputs.project }}" --role "${{ inputs.role }}" --issue "${{ inputs.issue }}" \
+              --outbox "$in/orgrove-out" --cost "$in/result.json" --run-id "${{ needs.reserve.outputs.run_id }}" | tee -a "$GITHUB_STEP_SUMMARY" || true
+            # Project memory (orgrove.memory): the run's checked notes for its role; never fails the step.
+            python -m orgrove.memory learn --result "$in/result.json" --project "${{ inputs.project }}" \
+              --role "${{ inputs.role }}" --issue "${{ steps.cfg.outputs.repo }}#${{ inputs.issue }}" \
+              --run-id "${{ needs.reserve.outputs.run_id }}" || true
           fi
 
       - name: Clear activity label and summarise
-        if: always() && inputs.role != 'gate'
+        if: always()
         env:
           GH_TOKEN: ${{ steps.tok.outputs.token }}
+          RC: ${{ needs.agent.outputs.rc }}              # agent-job outputs are data: never expanded inside run: (#258)
+          AGENT_RESULT: ${{ needs.agent.result }}
         run: |
-          gh issue edit "${{ inputs.issue }}" -R "${{ steps.cfg.outputs.repo }}" --remove-label "agent/${{ inputs.role }}" || true
+          # L-020: a label left behind kept a role "working" for two days (2026-11-03..05), and `|| true` hid why.
+          # REST removes this one label; reading it back proves it is gone. Still there after 3 tries: a warning on the
+          # run, and the dispatcher removes it on its next tick (office.stale_labels).
+          label="agent/${{ inputs.role }}" repo="${{ steps.cfg.outputs.repo }}" n="${{ inputs.issue }}"
+          for try in 1 2 3; do
+            gh api -X DELETE "repos/$repo/issues/$n/labels/${label//\//%2F}" --silent 2>"$RUNNER_TEMP/label.err" || :
+            if names=$(gh issue view "$n" -R "$repo" --json labels -q '.labels[].name') && ! grep -qxF "$label" <<<"$names"; then
+              break
+            fi
+            if [ "$try" = 3 ]; then
+              echo "::warning::$label is still on $repo#$n after 3 tries ($(head -c 200 "$RUNNER_TEMP/label.err")); the dispatcher removes it"
+            else
+              sleep $((try * 5))
+            fi
+          done
           # The reason a run failed goes to the log, not only the summary page (2026-10-28: a workspace API limit
           # stopped every agent for hours unseen). ORGROVE_DEBUG=true logs the full answer of every run.
-          python -m orgrove.agent_result "$RUNNER_TEMP/result.json" --label "${{ inputs.role }} on #${{ inputs.issue }}" \
+          python -m orgrove.agent_result "$RUNNER_TEMP/in/result.json" --label "${{ inputs.role }} on #${{ inputs.issue }}" \
             --debug "${{ vars.ORGROVE_DEBUG }}" --summary "$GITHUB_STEP_SUMMARY" || true
           bin/api-allowance "ORGrove App, after ${{ inputs.role }} on #${{ inputs.issue }}" || true
-          test "${{ steps.agent.outputs.rc }}" = 0 || test "${{ steps.agent.outcome }}" = skipped
+          test "$RC" = 0 || test "$AGENT_RESULT" = skipped
 
+  # Job 4: wake the dispatcher whatever happened above (#27).
+  handoff:
+    needs: [reserve, agent, apply]
+    if: always() && vars.ORGROVE_ENABLED == 'true'
+    runs-on: ubuntu-latest
+    steps:
       - name: Hand off to the dispatcher
         # Don't wait for cron: as soon as an agent finishes, give the next free agent its work (#27).
         if: always()

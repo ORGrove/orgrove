@@ -29,7 +29,7 @@ from collections import defaultdict
 from datetime import datetime, time, timedelta
 from zoneinfo import ZoneInfo
 
-from orgrove import budget, ci, lessons, manifest, office, org, verdict
+from orgrove import budget, ci, dispatch, lessons, manifest, office, org, verdict
 from orgrove.dispatch import CI_RED
 
 CONFIG = manifest.ROOT / "config" / "retro.toml"
@@ -68,6 +68,37 @@ def runs_by_issue(events, day, repo):
     return out
 
 
+FIX_ROLES = ("dev", "devops")
+
+
+def conflict_fixes(events, day, repo, issue_of=None):
+    """The agent time spent only on branch conflicts: for each PR the dispatcher sent back as conflicting with main
+    (update_branch result "conflict"), the first Dev or DevOps run on that ticket after it, if it settled on `day`.
+    -> [{"issue", "pr", "role", "usd", "minutes"}]. Conflicts recorded before 2026-11-03 carry no issue: `issue_of(pr)`
+    finds it from the PR's branch, or they are skipped."""
+    conflicts = []
+    for e in sorted((e for e in events if e.get("type") == "update_branch" and e.get("repo") == repo
+                     and e.get("result") == "conflict"), key=lambda e: e["ts"]):
+        n = e.get("issue") or (issue_of(e["pr"]) if issue_of else None)
+        if n:
+            conflicts.append({**e, "issue": n})
+    if not conflicts:
+        return []
+    start = {e["run_id"]: e["ts"] for e in events if e.get("type") == "reserve" and e.get("run_id") and e.get("ts")}
+    fixes = sorted((e for e in events if e.get("type") == "cost" and e.get("role") in FIX_ROLES and e.get("ts")
+                    and e.get("issue", "").rsplit("#", 1)[0] == repo), key=lambda e: e["ts"])
+    out = []
+    for c in conflicts:
+        fix = next((f for f in fixes if f["issue"] == f"{repo}#{c['issue']}" and f["ts"] > c["ts"]), None)
+        if fix is None or fix.get("day") != day:
+            continue
+        began = start.get(fix.get("run_id"))
+        minutes = round((_at(fix["ts"]) - _at(began)).total_seconds() / 60) if began else None
+        out.append({"issue": c["issue"], "pr": c["pr"], "role": fix["role"], "usd": round(fix.get("usd") or 0, 2),
+                    "minutes": minutes})
+    return out
+
+
 def budget_ran_out(events, day, tz):
     """Local time the dispatcher first held a role for budget on `day`, or None."""
     for e in sorted((e for e in events if e.get("type") == "status" and e.get("day") == day), key=lambda e: e["ts"]):
@@ -78,7 +109,7 @@ def budget_ran_out(events, day, tz):
 
 def comments_on(repo, n, start, end, gh):
     since = start.astimezone(ZoneInfo("UTC")).strftime("%Y-%m-%dT%H:%M:%SZ")  # a "+05:30" would arrive as a space
-    got = gh("api", f"repos/{repo}/issues/{n}/comments?since={since}&per_page=100")
+    got = office.issue_comments(repo, n, gh, since)
     return [c for c in got if start <= _at(c["created_at"]) < end]
 
 
@@ -135,6 +166,18 @@ def incidents_for(project, repo, day, tz, events, gh):
             continue
         found.append({"project": project, "repo": repo, "issue": n, "kind": "rework" if rework else "sanity_fail",
                       "runs": dict(r["runs"]), "usd": round(r["usd"], 2), **(said or {})})
+    def issue_of(pr):
+        m = re.match(r"agent/(\d+)-", (gh("api", f"repos/{repo}/pulls/{pr}").get("head") or {}).get("ref", ""))
+        return int(m.group(1)) if m else None
+
+    for f in conflict_fixes(events, day, repo, issue_of):
+        found.append({"project": project, "repo": repo, "kind": "conflict", **f})
+    for (n, role), k in sorted(dispatch.paid_runs(events, day, repo).items()):
+        if k >= dispatch.loop_cap(role):   # L-018: the dispatcher stopped this role on this ticket for the rest of the day
+            usd = sum(float(e.get("usd") or 0) for e in events if e["type"] == "cost" and e.get("day") == day
+                      and e.get("issue") == f"{repo}#{n}" and e.get("role") == role)
+            found.append({"project": project, "repo": repo, "issue": n, "kind": "loop", "role": role, "paid_runs": k,
+                          "usd": round(usd, 2)})
     for p in prs_opened(repo, start, end, gh):
         if p["ci_now"] == "red" or p["human_commits"]:
             m = re.match(r"agent/(\d+)-", p["branch"])
@@ -232,6 +275,11 @@ def incident_table(incidents, result):
         if i["kind"] in ("rework", "sanity_fail"):
             what = ("Sanity failed after merge; " if i["kind"] == "sanity_fail" else "") + \
                 "runs " + ", ".join(f"{k}×{v}" for k, v in i["runs"].items())
+        elif i["kind"] == "conflict":
+            what = (f"PR #{i['pr']} conflicted with main; {i['role']} spent "
+                    f"{i['minutes'] if i['minutes'] is not None else '?'} min resolving it")
+        elif i["kind"] == "loop":
+            what = f"{i['role']} ran {i['paid_runs']} paid times in one day; stopped on it until tomorrow (L-018)"
         elif i["kind"] == "pr_red":
             what = f"PR #{i['pr']} is red"
         else:
@@ -253,7 +301,14 @@ def report(facts, result, pr_url=None, escalations=()):
              f"- Rework: **${facts['rework_usd']:.2f}** on {sum(i['kind'] == 'rework' for i in facts['incidents'])} ticket(s); "
              f"CI bounces {sum(i.get('ci_bounces', 0) for i in facts['incidents'])}; "
              f"agent PRs red now {sum(i['kind'] == 'pr_red' for i in facts['incidents'])}; "
-             f"agent PRs a human had to fix {sum(i['kind'] == 'human_fixup' for i in facts['incidents'])}"]
+             f"agent PRs a human had to fix {sum(i['kind'] == 'human_fixup' for i in facts['incidents'])}",
+             "- Branch conflicts: {n} (${usd:.2f}, {m} min of agent time spent only on merging main)".format(
+                 n=len(cf := [i for i in facts["incidents"] if i["kind"] == "conflict"]),
+                 usd=sum(i["usd"] for i in cf), m=sum(i["minutes"] or 0 for i in cf))]
+    loops = [i for i in facts["incidents"] if i["kind"] == "loop"]
+    if loops:
+        lines.append(f"- **Loops stopped: {len(loops)}** (${sum(i['usd'] for i in loops):.2f} before the stop): "
+                     + ", ".join(f"{i['repo'].split('/')[-1]}#{i['issue']} {i['role']}×{i['paid_runs']}" for i in loops))
     if not facts["incidents"]:
         lines.append("\nQuiet day: no rework, no red PRs, no escalations. No model call ($0).")
     else:

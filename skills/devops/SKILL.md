@@ -22,12 +22,18 @@ The dispatcher puts a ticket whose merge failed to deploy back at `stage/in-dev`
    - **code regression:** the change, or code it touched
    - **cloud-side:** the account, a quota, a permission, the provider
 2. **Code regression:** fix it in code. Start a new agent branch from the default branch (`agent/<n>-deploy-fix`), follow the Developer flow (the fix, a test that would have caught it, `commands.contract`, a handoff comment that quotes the failing log line), then `stage/agent-review`. The dispatcher sends it through review to a new PR on the same ticket.
-3. **Everything else** (flaky, CI config, cloud-side): comment your classification, the failing step and a log excerpt, say whether a rerun is safe, and add `needs/human`. Workflow files are protected, and only humans touch the cloud.
+3. **Everything else** (flaky, CI config, cloud-side): comment your classification, the failing step and a log excerpt, say whether a rerun is safe, and send `questions`. Workflow files are protected, and only humans touch the cloud.
 4. **Never rerun a deploy yourself.** A second failure after your fix goes to the owner by itself.
 
 ## On an `area/infra` ticket at `stage/planned`
-Follow the Developer flow exactly (`skills/dev/SKILL.md`): an agent branch, scoped tests (`cdk` jest or synth for CDK changes), a handoff comment, then `stage/agent-review`. As for Dev: run `commands.contract` before every push, and on a CI bounce read the failing
+Follow the Developer flow exactly (`skills/dev/SKILL.md`), outbox keys included (`stage_request`, `flags`, `waits_for`, `close` work as they do for Dev): an agent branch, scoped tests (`cdk` jest or synth for CDK changes), a handoff comment, then `stage/agent-review`. As for Dev: run `commands.contract` before every push, and on a CI bounce read the failing
 job's log and fix the cause (`gh run view <run-id> --log-failed`).
+
+## On an `incident` ticket (raised by ORGrove Floor 2)
+The ticket holds counts and names, never log text, and you have no AWS access: read the code and configuration the ticket points at (task memory, worker settings, alarms, limits) and say what you think caused it and what you could not see. Ask the owner's session for the AWS reads you need, by comment.
+When the fix has merged, post **one comment that starts with `<!-- orgrove:rca-draft -->`**, then a line `Title:` naming the incident in plain words (for example `Title: The Dev API ran out of memory because two pages loaded every row`, never the alert's own name), and has exactly these headings, in plain words a non-engineer can follow (explain each technical term in brackets, no log lines):
+`## What happened`, `## Who or what was affected, and for how long`, `## Why it happened` (the cause and how we know, with counts), `## How we noticed`, `## What we fixed` (the PR), `## How it will not happen again`.
+The last section must have a line `Rule:` (what everyone must do from now on) and a line `Check:` (the test, alarm, limit or gate that would catch it early), and name the ticket or PR that adds it. "Be more careful" or "monitor more" is not a prevention. A person approves it with the label `rca/approved` (never yours to set); only then is it published and its Rule becomes a lesson.
 
 ## Infrastructure as code
 You may change infrastructure and IAM **as code** (CDK, CloudFormation, Terraform) when the ticket needs it. AWS only sees it after a human merges and CI deploys it.

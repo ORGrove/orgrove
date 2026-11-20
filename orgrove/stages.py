@@ -55,6 +55,14 @@ def allowed(cfg, frm, to, actor):
     )
 
 
+def reachable(cfg, frm, to, actor):
+    """The move frm -> to is allowed for actor: directly, or in two allowed steps by the same actor (planned ->
+    in-dev -> agent-review is one Dev run: it creates the branch and pushes it, and can send only one request)."""
+    if allowed(cfg, frm, to, actor):
+        return True
+    return any(allowed(cfg, frm, mid, actor) and allowed(cfg, mid, to, actor) for mid in stage_ids(cfg))
+
+
 def validate(cfg):
     """Every transition refers to a known stage, and every stage can be reached and left."""
     known = set(stage_ids(cfg)) | TERMINAL

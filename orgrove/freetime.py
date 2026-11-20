@@ -85,7 +85,7 @@ def targets(repo, max_prs, gh=office.gh_json):
     out = []
     for p in sorted(prs, key=lambda p: p["number"]):
         fails = failing_checks(p.get("statusCheckRollup"))
-        if not fails or triaged(gh("api", f"repos/{repo}/issues/{p['number']}/comments?per_page=100"), p["headRefOid"]):
+        if not fails or triaged(office.issue_comments(repo, p["number"], gh), p["headRefOid"]):
             continue
         out.append({"number": p["number"], "title": p["title"], "url": p["url"], "head": p["headRefOid"], "failing": fails})
         if len(out) >= max_prs:

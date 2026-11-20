@@ -73,6 +73,9 @@ body.meeting #legend { display: none !important; }
 .type.on { border-color: var(--blue); box-shadow: 0 0 0 2px rgba(79,95,214,.25); background: #fff; }
 .who { display: flex; flex-wrap: wrap; gap: 6px; margin: 6px 0 10px; }
 .who i { font-style: normal; font-size: 12px; font-weight: 600; padding: 3px 10px; border-radius: 999px; background: rgba(31,36,48,.07); }
+.who button.pick { font: inherit; font-size: 12px; font-weight: 600; padding: 3px 10px; border-radius: 999px; border: 1px solid transparent;
+  background: rgba(31,36,48,.07); cursor: pointer; }
+.who button.pick.on { border-color: var(--blue); background: #fff; box-shadow: 0 0 0 2px rgba(79,95,214,.2); }
 #picker textarea, #dock input { width: 100%; font: inherit; border: 1px solid var(--line); border-radius: 10px; padding: 10px;
   background: #fff; color: var(--ink); }
 #picker textarea { min-height: 70px; }
@@ -168,7 +171,7 @@ body.intro #skip { opacity: 1; }
 <div id="panel" class="glass"><button class="close" id="pclose" aria-label="Close">×</button><div id="pbody"></div></div>
 <div id="views" class="glass"></div>
 <div id="picker" class="glass" role="dialog" aria-label="Call a meeting" data-pro="meetings">
-  <h2>Call a meeting</h2><div class="sub" style="color:var(--muted)">Pick the kind of meeting. Everyone invited walks to the meeting room; you lead it.</div>
+  <h2>Call a meeting</h2><div class="sub" style="color:var(--muted)">Pick the kind of meeting. Everyone invited walks to the meeting room (a chat with one or two people is in your cabin); you lead it.</div>
   <div class="types" id="types"></div>
   <div id="tdetail"></div>
   <textarea id="opening" placeholder="What's on your mind? (optional: hold the mic to speak, or type)"></textarea>

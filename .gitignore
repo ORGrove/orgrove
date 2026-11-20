@@ -1,7 +1,9 @@
 # Python build artefacts must never be committed
 __pycache__/
 *.py[cod]
-.venv/
+# No trailing slash: a .venv or node_modules that is a link (worktrees share them) must match too (2026-11-04)
+.venv
+node_modules
 
 
 # Local Claude Code files stay out of git (AI-DLC was removed 2026-10-27). Only our own rule is versioned.
@@ -12,3 +14,7 @@ __pycache__/
 
 # Test coverage data written by local runs (bin/check)
 .coverage
+
+# A Pro licence is sent to one client and lives only in their copy (#426); the signing key never comes near a repo
+config/licence.json
+licence-signing.key

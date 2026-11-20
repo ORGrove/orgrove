@@ -7,7 +7,9 @@ break_min = 0           # owner 2026-10-29: no break while work waits; an agent 
                         # The budget caps pace spending. An install that wants pacing may set minutes here (0-240).
 
 [roles.pm]
-outbox = ["comment", "questions", "sub_items", "stage_request"]   # what orgrove apply accepts from this role (#40)
+outbox = ["comment", "questions", "stage_request", "flags", "waits_for", "close", "comment_on", "plan", "board", "milestone"]   # what orgrove apply accepts from this role (#40)
+flags = { add = ["blocked/parked"], remove = ["needs/plan", "needs/roadmap"] }   # the labels it may change (park: the owner said later; the roadmap pass ends); stage labels move only by stage_request
+close = "any_open"                       # duplicates, covered and done tickets, each with its reason as a comment
 skill = "pm"
 model = "claude-opus-5-5"
 method = "skills"
@@ -18,12 +20,14 @@ contents = "read"
 tools = ["Read", "Grep", "Glob", "Bash(gh issue:*)", "Bash(gh api:*)", "Bash(gh project item-edit:*)", "Bash(gh project field-list:*)", "Bash(gh project view:*)", "Bash(gh pr list:*)"]
 
 [roles.dev]
-outbox = ["comment", "questions", "stage_request"]   # what orgrove apply accepts from this role (#40)
+outbox = ["comment", "questions", "stage_request", "flags", "waits_for", "close"]   # what orgrove apply accepts from this role (#40)
+flags = { remove = ["needs/fix"] }
+close = "sub_issues"                     # only a sub-issue of its own ticket, as completed
 skill = "dev"
 model = "claude-sonnet-5-5"
 method = "skills"
 on = ["stage:planned", "label:needs/fix"]
-budget_share = 0.45
+budget_share = 0.40   # 0.45 until the Delivery Lead took 0.05 (2026-11-02)
 ceiling_usd = 2.0
 contents = "write"
 runs_commands = true   # runs the project's commands: gets the project's `tools` too (#159)
@@ -54,7 +58,9 @@ contents = "read"
 tools = ["Read", "Grep", "Glob", "Bash(git diff:*)", "Bash(git log:*)", "Bash(git show:*)", "Bash(gh issue:*)", "Bash(gh api:*)", "Bash(ls:*)"]
 
 [roles.devops]
-outbox = ["comment", "questions", "stage_request"]   # what orgrove apply accepts from this role (#40)
+outbox = ["comment", "questions", "stage_request", "flags", "waits_for", "close"]   # what orgrove apply accepts from this role (#40)
+flags = { remove = ["needs/fix"] }
+close = "sub_issues"
 skill = "devops"
 model = "claude-sonnet-5-5"
 method = "skills"
@@ -75,3 +81,18 @@ budget_share = 0.05
 ceiling_usd = 0.5
 contents = "read"
 tools = ["Read", "Bash(curl:*)", "Bash(gh issue:*)", "Bash(gh api:*)", "Bash(gh run:*)"]
+
+# The Delivery Lead (owner decision 2026-11-02): the one agent that speaks to the owner. Every question an agent or the
+# dispatcher raises lands here first (`needs/delivery`). It settles what isn't the owner's with the other agents, and
+# turns the rest into one plain question with options, costs and a recommendation (outbox `owner_question`).
+[roles.delivery]
+outbox = ["comment", "owner_question", "route", "close"]   # no `questions`: its questions to the owner are owner_question only
+close = "sub_issues"                     # a fixed sub-issue that holds its ticket (stalled work), nothing else
+skill = "delivery"
+model = "claude-sonnet-5-5"
+method = "skills"
+on = ["label:needs/delivery"]
+budget_share = 0.05
+ceiling_usd = 0.6
+contents = "read"
+tools = ["Read", "Grep", "Glob", "Bash(gh issue:*)", "Bash(gh api:*)", "Bash(gh pr view:*)", "Bash(gh pr list:*)", "Bash(git log:*)", "Bash(ls:*)"]

@@ -1,0 +1,11 @@
+#!/bin/sh
+# Does a real model, given each role's real instructions, produce a result the real validator accepts? (L-021)
+# Runs in a sandbox, touches no GitHub. Needs npm (it installs the Claude Code the workflow uses) and a Claude login.
+cd "$(dirname "$0")/.." || exit 1
+for py in python3.14 python3.13 python3.12 python3.11 python3; do
+  if command -v "$py" >/dev/null 2>&1 && "$py" -c 'import sys; sys.exit(sys.version_info < (3, 11))' 2>/dev/null; then
+    exec "$py" -m orgrove.contract "$@"
+  fi
+done
+echo "ORGrove needs Python 3.11 or newer: https://www.python.org/downloads/" >&2
+exit 1

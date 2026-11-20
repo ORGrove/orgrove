@@ -19,10 +19,17 @@ You implement exactly one ticket. Reviewers who can't see your reasoning will ju
 - Its acceptance criteria, security note and scope, written by the PM
 
 ## Steps
-0. **Waits for other tickets?** If this work builds on open tickets that haven't merged yet, it isn't the owner's question. Add `<!-- orgrove:after #<a> #<b> -->` to the issue body and the label `blocked/deps`, with a one-line comment naming them. Don't add `needs/human`. The dispatcher releases the ticket by itself once every one of them is closed or on Dev. Then stop: don't build the missing pieces yourself.
-1. Work on branch `agent/<issue>-<short-slug>`. Create it from the default branch, or reuse it for `needs/fix`. Move the label to `stage/in-dev`.
+0. **Waits for other tickets?** If this work builds on open tickets that haven't merged yet, it isn't the owner's question. Send `waits_for` with their numbers (it writes the marker the dispatcher reads and the `blocked/deps` flag) and a one-line `comment` naming them. Don't send `questions`. The dispatcher releases the ticket by itself once every one of them is closed or on Dev. Then stop: don't build the missing pieces yourself.
+1. Work on branch `agent/<issue>-<short-slug>`. Create it from the default branch, or reuse it for `needs/fix`. (You hold no token that changes labels: the stage moves once, at the end, by your `stage_request`.)
 2. Implement only what the acceptance criteria need. For `needs/fix`:
-   - **Sub-issues:** fix each open one and close it with a comment pointing at the commit.
+   - **Sub-issues:** fix each open one and send `close` for it (reason `completed`, a comment pointing at the commit), in the same run. Never
+     give a sub-issue its own `stage/*` label or leave it open "until the branch merges": the gate opens the PR only
+     once every sub-issue is closed, so the two would wait for each other (2026-11-03: #263 on #41's branch).
+   - **Conflict with main** (the dispatcher's note says the PR is DIRTY): merge `origin/main` into the branch, never
+     rebase or force-push. In each conflicting hunk, main's side may carry a decision another ticket or the owner
+     already made: keep it, and fit your change around it. If the two sides want different things and no comment
+     on the ticket says which wins, don't guess: `needs/delivery` with both hunks quoted. List each resolved file
+     in your handoff, one line each, with which side you kept (2026-11-03: #730 vs #724, Dev's AI provider).
    - **CI bounce:** open the failing job's log (`gh run view <run-id> --log-failed`; the run id is in the check URL)
      and fix the cause. Never edit the test to pass, skip it or loosen it.
    - **Fix the class, not the instance (L-003):** for each defect you fix, search the diff and the functions it
@@ -38,9 +45,9 @@ You implement exactly one ticket. Reviewers who can't see your reasoning will ju
    - **siblings checked:** the search you ran for other instances of each fixed defect, and what it found
    - anything you couldn't do and why
 
-   Then move the label to `stage/agent-review` and remove `needs/fix`.
+   Then send `stage_request` `agent-review` (from `planned` it covers `in-dev` too) and, on a fix round, `flags` removing `needs/fix`.
 
-## Stop and ask (`needs/human`, with a comment) when
+## Stop and ask (`needs/delivery`, with a comment for the Delivery Lead) when
 Write it for the owner, not for ORGrove: name a setting by what it is and where it lives ("this project's list of things agents never do, in `projects/<project>.toml`"), never by its key (`limits.forbidden`).
 
 - The fix needs anything in `limits.forbidden`, a new dependency, a migration that changes existing columns, or a change to the acceptance criteria.

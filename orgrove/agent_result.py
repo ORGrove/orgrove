@@ -37,7 +37,9 @@ def render(raw, label, debug=False):
 
 def refusal(raw):
     """The AI provider's error when it refused the run ("API Error: 400 ... usage limits"), else ''.
-    Only provider errors: an agent that ran and failed at its task is not a refusal."""
+    Only provider errors: an agent that ran and failed at its task is not a refusal. A failed run that cost exactly $0
+    never reached the model, whatever its wording: on 2026-11-03 "Credit balance is too low" had no "API Error" prefix,
+    so nothing paused and 98 runs failed in 30 minutes, one a minute."""
     try:
         r = json.loads(raw)
     except ValueError:
@@ -45,7 +47,33 @@ def refusal(raw):
     if not isinstance(r, dict) or not r.get("is_error"):
         return ""
     text = (r.get("result") or "").strip()
-    return text[:300] if text.startswith("API Error") else ""
+    unpaid = r.get("total_cost_usd") is not None and float(r.get("total_cost_usd") or 0) == 0
+    return (text or "the AI provider refused the run")[:300] if text.startswith("API Error") or unpaid else ""
+
+
+def usage(raw):
+    """Where one run's tokens went, for the cost record (plan 2026-11-05-agent-context-budget, step 1); None if unknown.
+    Summed over every model the run used (Claude Code also calls a small model for housekeeping). cache_write is
+    input written to the prompt cache (1.25x or 2x the input price), cache_read is input read back from it (0.1x or
+    less), input is the rest. Measured 2026-11-05: a one-word answer writes ~31,000 tokens of Claude Code's own
+    instructions and tools to the cache, so whether the next run reads them back is most of the saving."""
+    try:
+        r = json.loads(raw)
+    except ValueError:
+        return None
+    if not isinstance(r, dict):
+        return None
+    models = r.get("modelUsage") if isinstance(r.get("modelUsage"), dict) else {}
+    keys = (("input", "inputTokens", "input_tokens"), ("cache_read", "cacheReadInputTokens", "cache_read_input_tokens"),
+            ("cache_write", "cacheCreationInputTokens", "cache_creation_input_tokens"), ("output", "outputTokens", "output_tokens"))
+    if models:
+        out = {k: sum(int((m or {}).get(camel) or 0) for m in models.values()) for k, camel, _ in keys}
+    elif isinstance(r.get("usage"), dict):
+        out = {k: int(r["usage"].get(snake) or 0) for k, _, snake in keys}
+    else:
+        return None
+    out["turns"] = int(r.get("num_turns") or 0)
+    return out
 
 
 def main(argv=None):

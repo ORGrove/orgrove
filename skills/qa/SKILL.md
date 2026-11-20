@@ -34,7 +34,7 @@ can't judge.
    start the finding's title with the lesson id (e.g. `L-001: catalogue changed but the manifest was not regenerated`).
 5. Report **every** instance of a problem in this round, not just the first one you find (L-003). Another round costs a Dev
    run and both reviews again.
-6. Each **blocking** problem becomes a sub-issue of the ticket: a title, the file and line, what is wrong, and what would fix it. Non-blocking notes go in the verdict only.
+6. Each **blocking** problem becomes a sub-issue of the ticket: send it in `sub_items` (a title, and a body with the file and line, what is wrong, and what would fix it), and give its finding in the verdict `sub_item` with its place in that list, counting from 0 (`skills/VERDICT.md`). Non-blocking notes go in the verdict only.
 7. Post the verdict in the format in `skills/VERDICT.md`, with `role: "qa"` and the head you reviewed.
 
 Blocking means a criterion isn't met or isn't tested, a regression, or a broken build. Style is never blocking unless the project rules say so.

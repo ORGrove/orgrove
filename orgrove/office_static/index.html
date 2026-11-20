@@ -94,6 +94,7 @@ tr.reserve td { color: var(--muted); }
 .inbox button:disabled { opacity: .45; cursor: not-allowed; }
 .inbox .note { font-size: 11.5px; color: var(--muted); }
 .inbox a { display: block; border: 1px solid var(--line); border-radius: 8px; padding: 9px 10px; margin-bottom: 8px; }
+.inbox details.later summary { cursor: pointer; font-size: 12px; font-weight: 700; color: var(--muted); margin: 6px 0; }
 .inbox .k { font-size: 11px; font-weight: 700; text-transform: uppercase; letter-spacing: .04em; }
 .k.merge { color: var(--accent); } .k.decision { color: var(--warn); } .k.budget { color: var(--bad); }
 .ci { float: right; font-size: 11px; color: var(--muted); }
@@ -265,8 +266,8 @@ function render(s) {
     ? el("div", { class: "next" }, "Next: ", ...st.next.flatMap((n, i) => [i ? ", " : "", issueLink(n, st.project)])) : "";
   $("why").replaceChildren(...(W.headline ? [el("div", { class: "why" },
     el("b", {}, W.headline),
-    W.owner_waiting.length ? el("div", { class: "sub" }, "Waiting on you: ",
-      ...W.owner_waiting.slice(0, 8).flatMap((w, i) => [i ? " · " : "", `${w.what} `, issueLink(w.issue, w.project)])) : "",
+    W.owner_waiting.some((w) => !w.later) ? el("div", { class: "sub" }, "Waiting on you: ",
+      ...W.owner_waiting.filter((w) => !w.later).slice(0, 8).flatMap((w, i) => [i ? " · " : "", `${w.what} `, issueLink(w.issue, w.project)])) : "",
     el("div", { class: "sub" }, W.as_of ? `Dispatcher's last look: ${ago(W.as_of)}` + (W.budget_left != null ? ` · $${W.budget_left.toFixed(2)} left under the ${W.budget_kind} cap` : "")
                                         : "No dispatcher status recorded yet."))] : []));
   $("roster").replaceChildren(...s.roster.map((r) => {
@@ -298,13 +299,14 @@ function render(s) {
     g.count > 8 ? el("div", { class: "more" }, `+ ${g.count - 8} more`) : "")));
   const rmUrl = (shown.find((p) => p.roadmap_url) || {}).roadmap_url;
   { const a = $("rm-link"); if (rmUrl) { a.href = rmUrl; a.target = "_blank"; a.textContent = "roadmap issue ↗"; } else { a.textContent = ""; } }
-  const inbox = s.inbox.filter(inView);
-  $("inbox").replaceChildren(...(inbox.length ? inbox.map(inboxItem) : [el("div", { class: "empty" }, "Nothing waiting on you.")]));
+  const inbox = s.inbox.filter(inView), later = (s.later || []).filter(inView);
+  $("inbox").replaceChildren(...(inbox.length ? inbox.map(inboxItem) : [el("div", { class: "empty" }, "Nothing waiting on you.")]),
+    ...(later.length ? [el("details", { class: "later" }, el("summary", {}, `Later, no rush (${later.length})`), ...later.map(inboxItem))] : []));
 
   const verbs = { reserve: "started (limit)", cost: "spent", refused: "refused" };
   $("feed").replaceChildren(...(s.feed.length ? s.feed.map((e) => el("tr", { class: e.type },
     el("td", { class: "when" }, ago(e.ts)), el("td", {}, `${NAMES[e.role] || e.role} ${verbs[e.type] || e.type}`),
-    el("td", {}, el("a", { href: `https://github.com/${e.issue.replace("#", "/issues/")}` }, e.issue.split("/").pop())),
+    el("td", {}, e.issue ? el("a", { href: `https://github.com/${e.issue.replace("#", "/issues/")}` }, e.issue.split("/").pop()) : "-"),
     el("td", { class: "num" }, e.type === "refused" ? "refused" : usd(e.usd)))) : [el("tr", {}, el("td", { class: "empty" }, "No spend this month."))]));
 
   $("runs").replaceChildren(...s.runs.slice(0, 15).map((r) => el("tr", {},

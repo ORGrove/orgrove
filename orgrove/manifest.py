@@ -4,14 +4,18 @@ import shlex
 import tomllib
 from pathlib import Path
 
-from orgrove import budget, stages
+from orgrove import budget, stage_modes, stages
 
 ROOT = Path(__file__).resolve().parent.parent
 MODELS = {"claude-opus-5-5", "claude-sonnet-5-5", "claude-haiku-5-5"}
 METHODS = {"skills"}  # "aidlc" removed 2026-10-27 (never wired; AI-DLC dropped)
 DEPLOY_EVENTS = {"failed"}   # the dispatcher: a failed run of environments.dev.deployed_by on a merge (#159)
 REVIEWERS = {"qa", "security", "sanity"}
-OUTBOX_KEYS = ("verdict", "comment", "questions", "sub_items", "stage_request")  # = orgrove.outbox.KEYS
+OUTBOX_KEYS = ("verdict", "comment", "questions", "sub_items", "stage_request", "owner_question", "route",
+               "flags", "waits_for", "close", "comment_on", "plan", "board", "milestone")  # = orgrove.outbox.KEYS
+CLOSE_MODES = ("sub_issues", "any_open")   # = orgrove.outbox.CLOSE_MODES
+# What a reviewer (QA, Security, Sanity) may never have: they read and judge; the dispatcher makes the moves.
+READ_ONLY_KEYS = ("stage_request", "flags", "waits_for", "close", "comment_on", "plan", "board", "milestone")
 
 
 def _load(path):
@@ -159,8 +163,23 @@ def validate_department(dept):
         outbox = r.get("outbox")
         if not isinstance(outbox, list) or set(outbox) - set(OUTBOX_KEYS):
             errors.append(f"{role}: outbox must list keys from {list(OUTBOX_KEYS)}")
-        elif role in REVIEWERS and "stage_request" in outbox:
-            errors.append(f"{role}: reviewers may not have stage_request in their outbox")
+        else:
+            barred = READ_ONLY_KEYS if role in REVIEWERS else ()
+            for key in barred:
+                if key in outbox:
+                    errors.append(f"{role}: reviewers may not have {key} in their outbox")
+            policy = r.get("flags", {})
+            if "flags" in outbox:
+                if not isinstance(policy, dict) or not policy or set(policy) - {"add", "remove"} or not all(
+                        isinstance(v, list) and all(x in flags for x in v) for v in policy.values()):
+                    errors.append(f"{role}: flags must be a table of add/remove lists of labels from [flags] in stages.toml")
+            elif "flags" in r:
+                errors.append(f"{role}: has a flags policy but no flags in its outbox")
+            if "close" in outbox:
+                if r.get("close") not in CLOSE_MODES:
+                    errors.append(f"{role}: close must be one of {list(CLOSE_MODES)}")
+            elif "close" in r:
+                errors.append(f"{role}: has a close policy but no close in its outbox")
         if not 0 < r["ceiling_usd"] <= run_max:
             errors.append(f"{role}: ceiling ${r['ceiling_usd']} outside (0, ${run_max}]")
         for trig in r["on"]:
@@ -222,6 +241,7 @@ def validate_project(prof):
     ft = prof.get("free_time")
     if ft is not None and (not isinstance(ft.get("issue"), int) or ft["issue"] not in prof.get("skip_issues", [])):
         errors.append("free_time.issue must be a ticket number listed in skip_issues (never planned as work)")
+    errors += stage_modes.validate_profile(stages.load(), prof)
     review = prof.get("review", {})
     if not isinstance(review.get("external_prs"), bool):
         errors.append("review.external_prs must be set to true or false")

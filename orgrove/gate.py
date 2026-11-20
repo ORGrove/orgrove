@@ -30,6 +30,33 @@ def latest_verdicts(comments, head):
     return found
 
 
+def resolved_sub_issues(comments, head, open_sub_issues):
+    """[(sub-issue, reviewer)]: the open sub-issues a reviewer has resolved by approving a LATER head.
+
+    A blocking finding in an earlier verdict of a role raised the sub-issue; the same role now approves this head, so the
+    thing it found is, by its own judgement, fixed. Closing it used to depend on a model remembering to (Dev, PM or the
+    Delivery Lead), and on 2026-11-10 none did: QA and Security had approved round 2 and the pull request waited for an
+    open sub-issue nobody closed. A finding raised against this same head, or by the other reviewer, is not resolved."""
+    current = latest_verdicts(comments, head)
+    raised = {}
+    for c in comments:
+        if c["user"]["login"] != org.BOT_LOGIN:
+            continue
+        v = verdict.parse(c.get("body") or "")
+        if not v or v.get("head") == head:
+            continue
+        for f in v.get("findings", []):
+            if f.get("severity") == "blocking" and isinstance(f.get("sub_issue"), int):
+                raised.setdefault(v["role"], set()).add(f["sub_issue"])
+    out = []
+    for n in open_sub_issues:
+        for role in sorted(raised):
+            if n in raised[role] and (current.get(role) or {}).get("decision") == "approve":
+                out.append((n, role))
+                break
+    return out
+
+
 def readiness(verdicts, open_sub_issues, ci_state="green"):
     """Why the head may not become a PR yet; empty = ready. ci_state is orgrove.ci.ci_state of the head."""
     reasons = []
@@ -119,6 +146,13 @@ def main(argv=None):
     closed_subs = [s["number"] for s in subs if s["state"] == "closed"]
 
     verdicts = latest_verdicts(comments, head)
+    for n, role in resolved_sub_issues(comments, head, open_subs):    # the reviewer who raised it has approved the fix
+        gh("issue", "close", str(n), "-R", a.repo, "--reason", "completed", "--comment",
+           f"Resolved: {role.upper()} approved {head[:7]} (round {verdicts[role].get('round')}), the head after the one that raised "
+           "this. Closed by ORGrove's gate, so the pull request can open.")
+        print(f"closed #{n}: resolved by {role}'s approval of {head[:7]}")
+        open_subs.remove(n)
+        closed_subs.append(n)
     reasons = readiness(verdicts, open_subs, ci.ci_state(ci.head_checks(a.repo, head, office.gh_json)))
     if reasons:
         print("not ready: " + "; ".join(reasons))
@@ -147,7 +181,8 @@ def main(argv=None):
                          "--title", ("[infra] " if infra else "") + title,
                          "--body", pr_body(a.issue, head, verdicts, closed_subs, infra,
                                                   blocked if approval else (), approval), *reviewers).strip()
-    gh("issue", "edit", str(a.issue), "-R", a.repo, "--remove-label", "stage/agent-review",
+    # needs/fix is cleared too: the fix round is over once both reviewers approved (it stayed on a ticket that had a PR open)
+    gh("issue", "edit", str(a.issue), "-R", a.repo, "--remove-label", "stage/agent-review", "--remove-label", "needs/fix",
        "--add-label", "stage/awaiting-review")
     print(url)
     return 0

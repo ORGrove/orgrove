@@ -1,4 +1,7 @@
-"""ORGrove's two editions (#159): the one table of what only ORGrove Pro has.
+"""ORGrove's editions (#159): the one table of what only the paid editions have.
+
+Enterprise (owner, 2026-11-20) is every additional floor, customisation and voice. It ships in the same Pro build:
+a Pro licence grants the Pro parts, an Enterprise licence every part (orgrove/licence.py, `bin/licence --parts`).
 
 ORGrove Pro is all of ORGrove. ORGrove Community is the same commit with every part below removed (bin/package), so
 the two never drift apart: one source, one set of skills, and this one table. Everything that differs between them
@@ -15,8 +18,11 @@ A new Pro part is one entry here, with its files and addresses: hiding it, its P
 from dataclasses import dataclass
 from pathlib import Path
 
+from orgrove import licence
+
 ROOT = Path(__file__).resolve().parent.parent
 PRO_URL = "https://orgrove.com/#waitlist"
+ENTERPRISE_URL = "mailto:info@orgrove.com?subject=ORGrove%20Enterprise"
 
 
 @dataclass(frozen=True)
@@ -26,6 +32,13 @@ class Part:
     files: tuple                    # what only Pro ships, relative to the repo
     pages: tuple = ()               # addresses a person opens: Community shows the Pro page there
     api: tuple = ()                 # addresses the Office's pages call: Community answers a short JSON note
+    edition: str = "Pro"            # the edition it is sold in: Pro, or Enterprise (every additional floor; owner, 2026-11-20)
+
+    def get(self):
+        """(where to get it, the button's words) for the page at a missing part's address."""
+        if self.edition == "Enterprise":
+            return ENTERPRISE_URL, "Talk to us about ORGrove Enterprise"
+        return PRO_URL, "Join the ORGrove Pro waitlist"
 
 
 PARTS = {
@@ -50,6 +63,13 @@ PARTS = {
         "News chats",
         "On a break, the team chats about the day's headlines.",
         ("orgrove/office_news.py",), api=("/api/news",)),
+    "monitoring": Part(
+        "The Monitoring floor",
+        "A second floor where a team watches your production systems, with a local AI model so client data stays on your side.",
+        ("orgrove/monitoring.py", "orgrove/checks.py", "orgrove/awsread.py", "orgrove/incidents.py", "orgrove/rca.py", "orgrove/monitor_setup.py",
+         "infra/monitor-readonly.yaml", "bin/orgrove-monitor-setup", "orgrove/office_static/floor2.js", "orgrove/office_static/layout_floor2.js",
+         "orgrove/office_static/floor2.html", "config/monitoring.toml"),
+        pages=("/floor2", "/floor2.html"), api=("/api/floor2",), edition="Enterprise"),
     "wiki": Part(
         "The project wiki",
         "Nightly pages on the team's work, with your to-do list.",
@@ -62,13 +82,27 @@ def files():
     return [rel for part in PARTS.values() for rel in part.files]
 
 
-def has(part, root=ROOT):
-    """Whether this copy has the part: all its files are here (ORGrove Pro), or none are (Community)."""
+def installed(part, root=ROOT):
+    """Whether the part's files are here: all of them (ORGrove Pro), or none (Community)."""
     return all((root / rel).exists() for rel in PARTS[part].files)
+
+
+def has(part, root=ROOT):
+    """Whether this copy runs the part: its files are here and the licence grants it (orgrove/licence.py, #426).
+    ORGrove's own source checkout needs no licence; an installed copy does."""
+    return installed(part, root) and licence.status(root).grants(part)
 
 
 def present(root=ROOT):
     return {name: has(name, root) for name in PARTS}
+
+
+def unlicensed(part, root=ROOT):
+    """The licence Status when the part's files are here but the licence doesn't let it run, else None."""
+    if not installed(part, root):
+        return None
+    st = licence.status(root)
+    return None if st.grants(part) else st
 
 
 def missing_part(route, parts=None):

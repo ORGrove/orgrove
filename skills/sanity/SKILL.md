@@ -23,8 +23,8 @@ You confirm that what was merged actually works where it was deployed. You are *
 3. For each acceptance criterion that's observable from outside (a status code, a header, a page, an API response), check it and record the evidence: the request and the relevant part of the response.
    - Criteria that can only be checked from inside: write "not observable from Dev: covered by <test name> in the PR". Don't claim more.
 4. Post the verdict (`skills/VERDICT.md`, `role: "sanity"`, `decision: pass | fail`).
-   - **pass:** close the issue.
-   - **fail:** open a linked bug with the evidence, and move the ticket to `stage/in-dev` with `needs/fix`.
+   - **pass:** nothing more. The dispatcher hands a passed ticket back to the PM, who closes it if nothing is left.
+   - **fail:** send `sub_items` with a linked bug and the evidence, and give the finding in the verdict `sub_item` with its place in that list (counting from 0). The dispatcher moves the ticket back to Dev.
 
 ## Never
 - POST, PUT or DELETE, change settings, or create records, even on Dev.

@@ -35,14 +35,17 @@ cd orgrove
 ./install
 ```
 
+
 Or download the ZIP from GitHub, unpack it and run `./install` in that folder. Your install goes to a new `orgrove`
 repo in your organisation; the copy you cloned stays linked as `upstream`, for updates.
 
-It asks five things:
+`./install` opens a page in your browser and everything happens there: the questions, a progress list in plain
+words, the three GitHub steps, and a final check. Leave the terminal window open; you don't type in it. (Prefer
+the terminal? `./install --cli` asks the same questions there.) It asks five things:
 
 1. **Your GitHub organisation**: the name in `github.com/<name>`.
 2. **Your Anthropic API key.** Paste it; it stays hidden. It goes straight into a GitHub secret and is never saved
-   on your computer or shown again. Anthropic is asked once whether the key works.
+   on your computer or shown again. Anthropic is asked once whether the key works: a one-word request to its cheapest model (a fraction of a cent), so a key whose workspace has reached its spending limit is caught here and not by your first ticket.
 3. **The repo the agents work on.** Press Enter for a small sample project (recommended for a first try), or name
    an existing repo of yours. An existing repo is never changed directly: the installer opens a pull request with
    what it needs (a CI workflow and a small notify workflow), for you to merge.
@@ -50,12 +53,15 @@ It asks five things:
 5. **Who may give the agents work**: GitHub logins, comma-separated. Issues and comments from anyone else are read
    as data, never as instructions.
 
-Then your browser opens **twice**, once for each GitHub App ORGrove uses. Each time, click **Create** and then
-**Install** on GitHub's own page. You never download a key or copy an ID.
+Then the page takes you to GitHub three times, once for each GitHub App ORGrove uses. Each time, click **Create** and then
+**Install** on GitHub's own page, and GitHub sends you back to the installer. You never download a key or copy an ID.
 
-**No browser on that computer** (a Linux server over SSH, a container)? Fix the port of those pages and forward it
+**No browser on that computer** (a Linux server over SSH, a container)? Fix the port of the page and forward it
 to the computer you browse on: `ssh -L 8790:127.0.0.1:8790 you@server`, then on the server `./install --port 8790`,
 and open the address it prints. GitHub sends you back to that same address, so it must reach the installer.
+
+The page is served from your own computer only, behind a one-time secret in the address the installer prints. The API
+key you type there is handed to the installer in memory and is never shown in the page, a log or a file.
 
 The installer then sets everything else up, checks it with a dry run of the dispatcher (about a minute; it calls no model, so no Claude cost),
 and asks whether to switch the agents on. If it stops for any reason, run `./install` again: it continues where it
@@ -69,6 +75,7 @@ stopped.
 | The **project repo** the agents work on (the sample is `hello`) | your organisation, private |
 | The **ORGrove App**: the agents act as it; its key is only in a secret of the control repo | your organisation |
 | The **notify App**: starts ORGrove the moment a person acts; it can do nothing else | your organisation |
+| The **read-only App**: the AI model runs as it, so it can read tickets and pull requests but never change them | your organisation |
 | Settings: `config/` and `projects/<project>.toml` in the control repo | the control repo |
 
 Progress (names and IDs only, never a key) is kept in `~/.orgrove/installs/`.
@@ -85,6 +92,9 @@ Open an issue in the project repo, as one of the people you named in question 5,
 
 Watch them in the **Office** on your computer: `bin/orgrove-office` in the downloaded folder. It opens in your
 browser at http://127.0.0.1:8730 and shows who is working on what, live from GitHub.
+
+From here on, **GUIDE.md** is your day-to-day guide: writing issues, what each label means, where to watch, and
+how to hold or stop the agents.
 
 ## 4. Costs and safety
 
@@ -110,6 +120,24 @@ browser at http://127.0.0.1:8730 and shows who is working on what, live from Git
 
 - **Your data** stays in your GitHub; Claude sees what a run sends it, under your Anthropic account.
   OpsVision AI Systems Pvt Ltd, who make ORGrove, receive nothing.
+
+## Updating to a newer release
+
+```sh
+bin/orgrove-update --dry-run        # says what would change, changes nothing
+bin/orgrove-update                  # opens a pull request in your orgrove repo
+```
+
+It finds the newer release through the `upstream` remote (a copy you cloned). Installed from a ZIP? Download the
+newer release, unpack it, and run `bin/orgrove-update --from <that folder>`.
+
+- **A person merges every change.** The update is a pull request on its own branch; nothing in your install changes
+  until you merge it. Then `git pull` in this folder.
+- **Your work is safe.** A file you haven't touched since it shipped is replaced. A file you changed stays as you have it
+  and is listed in the pull request if the release changed it too. Your settings (`config/org.toml`, the spend caps,
+  `projects/`, `lessons/`) are never touched.
+- **It checks itself first.** The updated copy must pass the configuration check before anything leaves your computer.
+- It never changes your edition, and it stops, with the reason, if this folder has changes you haven't committed.
 
 ## 5. Troubleshooting
 
@@ -168,6 +196,13 @@ repo. Its private key goes into the control repo's secret `ORGROVE_APP_PRIVATE_K
 control repo only. In each project repo: the variables `ORGROVE_NOTIFY_APP_ID` and `ORGROVE_CONTROL_REPO` (the
 control repo's name), the secret `ORGROVE_NOTIFY_PRIVATE_KEY`, and `templates/orgrove-notify.yml` copied to
 `.github/workflows/orgrove-notify.yml`. A person's ticket, comment or merge then starts ORGrove at once.
+
+**B3. The read-only App.** A third App for the agents' model: Repository permissions Actions, Checks, Issues and Pull
+requests **read**, Contents read and write (Dev pushes its branch with it), nothing else. Install it on the control repo
+and each project repo. Its private key goes into the control repo's secret `ORGROVE_READ_APP_PRIVATE_KEY`, its ID into
+the variable `ORGROVE_READ_APP_ID`. The model's job then holds no key that can write a ticket, so a tricked model can't
+change your tracker; only a later step, which never runs the model, does the writing. `python3 -m orgrove.doctor` fails
+until this is in place.
 
 **C. The Anthropic key**: the control repo's secret `ANTHROPIC_API_KEY`.
 
