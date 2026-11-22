@@ -54,6 +54,17 @@ body.meeting #legend { display: none !important; }
   display: flex; align-items: center; gap: 6px; pointer-events: none; }
 .tag i { width: 7px; height: 7px; border-radius: 50%; display: inline-block; }
 .tag small { color: var(--muted); font-weight: 500; }
+.tag:has(.doing), .tag:has(.ctx) { flex-wrap: wrap; border-radius: 10px; max-width: 220px; white-space: normal; }
+.tag .doing, .tag .ctx { flex-basis: 100%; }
+.tag .doing { display: block; color: var(--muted); font-weight: 500; font-size: 10.5px; margin-top: 2px; }
+.tag .ctx { display: block; height: 3px; margin-top: 4px; border-radius: 2px; background: rgba(31,36,48,.12); overflow: hidden; }
+.tag .ctx i { display: block; height: 100%; width: 0; border-radius: 0; }
+/* A session that needs you (plan 2026-11-20): a solid amber sign; a guessed permission prompt is outlined. */
+.need { font: 800 15px/1 Inter, -apple-system, sans-serif; color: #fff; background: #d9822b; width: 24px; height: 24px; border-radius: 50%;
+  display: grid; place-items: center; box-shadow: 0 2px 8px rgba(0,0,0,.25); animation: needbob 1.4s ease-in-out infinite; }
+.need.maybe { background: #fff; color: #d9822b; border: 2px solid #d9822b; }
+@keyframes needbob { 50% { translate: 0 -5px; } }   /* translate, not transform: three.js places the label with transform */
+@media (prefers-reduced-motion: reduce) { .need { animation: none; } }
 /* Floor labels (Coffee, Lounge, ...) are hidden: the room says what it is (owner, 2026-10-30). */
 .zone { display: none; font: 700 11px Inter, -apple-system, sans-serif; letter-spacing: .12em; text-transform: uppercase;
   color: rgba(31,36,48,.55); pointer-events: none; white-space: nowrap; }
@@ -166,7 +177,7 @@ body.intro #skip { opacity: 1; }
   <div class="kpi" id="k-spend"><span class="v">–</span><span class="l">Spend today</span><div class="bar"><i id="b-spend"></i></div></div>
   <div class="spacer"></div>
   <span id="err"></span>
-  <span class="links"><button class="btn" id="callBtn" data-pro="meetings">Call a meeting</button><a href="/finance" data-pro="finance">Finance</a><a href="/">2D view</a></span>
+  <span class="links"><button class="btn ghost" id="chimeBtn" data-pro="sessions_live" hidden title="A soft chime when something starts needing you">🔕 Chime off</button><button class="btn" id="callBtn" data-pro="meetings">Call a meeting</button><a href="/finance" data-pro="finance">Finance</a><a href="/">2D view</a></span>
 </div>
 <div id="panel" class="glass"><button class="close" id="pclose" aria-label="Close">×</button><div id="pbody"></div></div>
 <div id="views" class="glass"></div>

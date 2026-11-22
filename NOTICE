@@ -4,3 +4,8 @@ Copyright 2026 OpsVision AI Systems Pvt Ltd
 This product is licensed under the Apache License, Version 2.0 (see LICENSE).
 
 It includes three.js (orgrove/office_static/vendor/three-0.186.1), MIT licensed: see the LICENSE file in that folder.
+
+The Office's view of your own coding sessions (orgrove/office_sessions.py, plan 2026-11-20) follows ideas from
+pixel-agents (https://github.com/pixel-agents-hq/pixel-agents, MIT licence, Copyright 2026 Pablo De Lucca): reading the
+session transcripts on the same computer, and treating a tool that has run 7 s with nothing new as a probable permission
+prompt. No code or art was copied.

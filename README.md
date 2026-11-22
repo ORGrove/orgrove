@@ -4,10 +4,17 @@ An AI engineering team that works in your GitHub: a product manager, a developer
 Sanity checker, each an agent with its own job, budget and limits. They plan tickets, write the code, review it
 and open a pull request. **A person merges every change.**
 
+![The ORGrove Office: the agents at their desks, in review and on a break (demo data)](.github/media/office-demo.gif)
+
+*The Office on your own computer, here with a demo project. Who sits at which desk follows real runs, and your own
+coding sessions on this computer get desks too.*
+
 - Runs in your own GitHub organisation (GitHub Actions) with your own Anthropic API key.
 - Hard daily and monthly spending caps, enforced before any run starts.
 - Reviewers can only read; protected files and your forbidden list are refused whatever a ticket says.
 - The Office (`bin/orgrove-office`) shows the team at work, live from GitHub, on your own computer.
+- **What it costs:** your own Anthropic key and GitHub Actions minutes, about $1 for a small ticket, under caps you
+  set. No account with us, and no telemetry.
 
 ## Install
 
@@ -47,5 +54,7 @@ explains what it needs, what it costs and how to fix problems, and lists every s
 or stop the agents, and what a ticket costs.
 
 ## Author
+
+Questions or ideas: [GitHub Discussions](https://github.com/ORGrove/orgrove/discussions).
 
 ORGrove is made by **OpsVision AI Systems Pvt Ltd**. See `AUTHORS`.

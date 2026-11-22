@@ -132,3 +132,27 @@ export function placements(s, mtg, layout, now = Date.now()) {
   const playing = (game) => [...brk].filter(([, b]) => b.spot?.name === game).map(([role]) => role);
   return { at, resting: resting.length, pingpong: playing("table tennis"), foosball: playing("foosball"), room };
 }
+
+// The owner's own coding sessions (/api/sessions, plan 2026-11-20): who sits in which session seat. A session
+// keeps its seat while it lives (nobody shuffles when another arrives); a new one takes the lowest free seat. Seats
+// are few (the room must never look crowded, owner 2026-11-21), so they go by need: one that needs you, then one
+// working, then one whose turn is done. A session without a seat that ranks higher takes the seat of the lowest-ranked
+// one; equals never displace each other. The rest are counted, not drawn. Returns { seat: Map id -> index, overflow }.
+const SESSION_RANK = { waiting: 0, working: 1, idle: 2 };
+export function sessionSeats(sessions, prev, nSeats) {
+  const list = sessions || [], rank = (s) => SESSION_RANK[s.state] ?? 2;
+  const byNeed = list.map((s, i) => [s, i]).sort((a, b) => rank(a[0]) - rank(b[0]) || a[1] - b[1]).map(([s]) => s);
+  const seat = new Map(), used = new Set();
+  for (const s of list) {
+    const i = prev?.get(s.id);
+    if (i != null && i < nSeats && !used.has(i)) { seat.set(s.id, i); used.add(i); }
+  }
+  for (const s of byNeed) {
+    if (seat.has(s.id)) continue;
+    let i = 0; while (used.has(i)) i++;
+    if (i < nSeats) { seat.set(s.id, i); used.add(i); continue; }
+    const seated = list.filter((x) => seat.has(x.id)).sort((a, b) => rank(b) - rank(a));   // lowest-ranked first
+    if (seated.length && rank(seated[0]) > rank(s)) { seat.set(s.id, seat.get(seated[0].id)); seat.delete(seated[0].id); }
+  }
+  return { seat, overflow: list.length - seat.size };
+}

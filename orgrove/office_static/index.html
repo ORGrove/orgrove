@@ -47,6 +47,10 @@ main { display: grid; grid-template-columns: minmax(0, 1fr) 340px; gap: 18px; pa
 @media (max-width: 1000px) { main { grid-template-columns: 1fr; } }
 .desks { display: grid; grid-template-columns: repeat(auto-fill, minmax(190px, 1fr)); gap: 10px; }
 .desks .desk { margin: 0; }
+.side { display: flex; flex-direction: column; gap: 18px; min-width: 0; }
+.desk.waiting { border-color: var(--warn); background: var(--warn-soft); }
+.desk.waiting .dot { background: var(--warn); animation: pulse 1.6s infinite; }
+.desk .helper { font-size: 12px; color: var(--muted); margin-top: 4px; }
 section.panel { background: var(--panel); border: 1px solid var(--line); border-radius: 12px; box-shadow: var(--shadow); padding: 14px; min-width: 0; }
 h2 { margin: 0 0 10px; font-size: 12px; text-transform: uppercase; letter-spacing: .06em; color: var(--muted); }
 .desk { border: 1px solid var(--line); border-radius: 10px; padding: 10px 12px; margin-bottom: 8px; }
@@ -149,7 +153,10 @@ footer { color: var(--muted); font-size: 12px; padding: 0 24px 22px; }
   <section class="panel wide"><h2>Pipeline</h2><div class="board" id="board"></div></section>
   <section class="panel wide"><h2>Roadmap · target dates set by the PM <a id="rm-link" style="float:right;text-transform:none;letter-spacing:0"></a></h2><div class="months" id="roadmap"></div></section>
   <section class="panel"><h2>Who's doing what · every idle agent says why</h2><div class="desks" id="roster"></div></section>
+  <div class="side">     <!-- the right column: what waits on you, then your own sessions (plan 2026-11-20) -->
   <section class="panel inbox"><h2>ORGrove Review · waiting on you</h2><div id="inbox"></div></section>
+  <section class="panel" id="sessions-panel"><h2>Your coding sessions · on this laptop</h2><div class="desks" id="sessions"></div></section>
+  </div>
   <section class="panel wide">
     <div class="feeds">
       <div><h2>Spend log (ledger)</h2><table id="feed"></table></div>
@@ -321,6 +328,30 @@ async function tick() {
   catch (e) { $("error").replaceChildren(el("div", { class: "err" }, "Office server not reachable: " + e)); }
 }
 tick(); setInterval(tick, 5000);   // local only: the server re-reads GitHub when the dispatcher has run
+// The owner's own coding sessions (orgrove/office_sessions.py): read from the laptop's transcripts, never their text.
+const SESSION_WHY = { question: "asked you a question", plan: "has a plan for you to approve", permission: "is asking your permission", "maybe-permission": "may need your permission" };
+function forHowLong(t) {
+  const m = Math.max(0, Math.round((Date.now() / 1000 - t) / 60));
+  return m < 1 ? "just now" : m < 60 ? `${m} min` : `${Math.floor(m / 60)} h ${m % 60} min`;
+}
+function sessionLine(x) {
+  const since = x.since ? ` · ${forHowLong(x.since)}` : "";
+  if (x.state === "waiting") return `Waiting for you: ${SESSION_WHY[x.why] || "needs you"}${since}`;
+  return x.state === "working" ? `Working${since}` : `Finished its turn; waiting for your next message${since}`;
+}
+function renderSessions(d) {
+  const list = d.sessions || [];
+  if (!d.enabled) { $("sessions").replaceChildren(el("div", { class: "meta" }, "Turned off (ORGROVE_SESSIONS=0).")); return; }
+  if (!list.length) { $("sessions").replaceChildren(el("div", { class: "meta" }, "No coding session is open on this laptop right now. When you open one, it shows here.")); return; }
+  $("sessions").replaceChildren(...list.map((x) => el("div", { class: "desk " + x.state },
+    el("div", { class: "top" }, el("span", { class: "dot" }), x.project),
+    el("div", { class: "meta" }, sessionLine(x)),
+    ...x.helpers.map((h) => el("div", { class: "helper" }, `+ helper${h.kind ? " (" + h.kind + ")" : ""}: ${h.state === "waiting" ? "waiting for you" : "working"}`)))));
+}
+async function tickSessions() {
+  try { renderSessions(await (await fetch("/api/sessions", { cache: "no-store" })).json()); } catch (e) { /* the main tick reports a dead server */ }
+}
+tickSessions(); setInterval(tickSessions, 1000);   // local files only: cheap enough every second
 </script>
 <footer class="byline">ORGrove · powered by OpsVision AI Systems Pvt Ltd</footer>
 </body>

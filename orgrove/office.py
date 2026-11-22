@@ -22,7 +22,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
-from orgrove import brand, budget, ci, editions, licence, manifest, office_actions, org, outbox, stages
+from orgrove import brand, budget, ci, editions, licence, manifest, office_actions, office_sessions, org, outbox, stages
 
 try:   # the publisher's own website panel: left out of a client's copy (bin/package, #159)
     from orgrove import office_waitlist
@@ -728,6 +728,8 @@ def make_handler(cache, brand_cfg=None):
             elif self.path.startswith("/api/state"):
                 live = {"meeting": MEETING.public()} if MEETING else {}
                 body, ctype = json.dumps(cache.get() | live | {"people": people()}).encode(), "application/json"
+            elif self.path.startswith("/api/sessions"):      # the owner's own Claude Code sessions on this laptop
+                body, ctype = json.dumps(office_sessions.snapshot()).encode(), "application/json"
             elif self.path.startswith("/api/licence"):
                 body, ctype = json.dumps(licence_banner()).encode(), "application/json"
             elif self.path.startswith("/api/edition"):
@@ -773,21 +775,19 @@ def make_handler(cache, brand_cfg=None):
                 return self._transcribe()
             if self.path == "/api/waitlist" and waitlist_on():
                 return self._waitlist()
+            if self.path == "/api/sessions/hooks":
+                return self._session_hooks()
             if self.path != "/api/act":
                 self.send_error(404)
                 return
             status, out = 200, {}
             try:
-                office_actions.check_request(self.headers, self.server.server_address[1])
-                length = int(self.headers.get("Content-Length") or 0)
-                if length > 16384:
-                    raise office_actions.Refused("request too large")
-                act = office_actions.validate(json.loads(self.rfile.read(length) or b"{}"),
+                act = office_actions.validate(json.loads(self._body(16384) or b"{}"),
                                               office_actions.project_repos())
                 out = {"ok": True, "message": office_actions.perform(act)}
                 cache.at = 0  # show the result on the next refresh
             except office_actions.Refused as exc:
-                status, out = 403, {"ok": False, "message": str(exc)}
+                status, out = 403, {"ok": False, "error": str(exc), "message": str(exc)}   # "error": csrf.js retry
             except (ValueError, subprocess.CalledProcessError) as exc:
                 status, out = 400, {"ok": False, "message": (getattr(exc, "stderr", "") or str(exc))[:300]}
             body = json.dumps(out).encode()
@@ -796,6 +796,17 @@ def make_handler(cache, brand_cfg=None):
             self.send_header("Cache-Control", "no-store")
             self.end_headers()
             self.wfile.write(body)
+
+        def _body(self, cap):
+            """The request's body (at most cap bytes), read BEFORE the Host/Origin/CSRF checks: a refusal sent while
+            the body is still unread can reach the browser as a connection reset instead of the 403, and then
+            csrf.js can't see "bad CSRF token" to retry after an Office restart (seen 2026-11-21, PR #435)."""
+            length = int(self.headers.get("Content-Length") or 0)
+            raw = self.rfile.read(min(max(length, 0), cap))
+            office_actions.check_request(self.headers, self.server.server_address[1])
+            if length > cap:
+                raise office_actions.Refused("request too large")
+            return raw
 
         def _send(self, status, body, ctype):
             body = brand.render(body, brand_cfg, office_actions.TOKEN).encode() if ctype.startswith("text/html") else body.encode()
@@ -807,15 +818,35 @@ def make_handler(cache, brand_cfg=None):
             self.end_headers()
             self.wfile.write(body)
 
+        def _session_hooks(self):
+            """Exact prompts on or off (ORGrove Pro, plan 2026-11-20 Phase 3): edits ~/.claude/settings.json, so only
+            from this Office page's own click (same Host/Origin/CSRF checks as /api/act), never on its own."""
+            status, out = 200, {}
+            try:
+                on = json.loads(self._body(256) or b"{}").get("on")
+                if not isinstance(on, bool):
+                    raise ValueError("say on: true or false")
+                out = {"ok": True, "hooks": office_sessions.set_hooks(on)}
+            except office_actions.Refused as exc:
+                status, out = 403, {"ok": False, "error": str(exc), "message": str(exc)}
+            except PermissionError as exc:
+                status, out = 404, {"ok": False, "message": str(exc)}
+            except office_sessions.HooksRefused as exc:      # the settings file couldn't be changed safely
+                status, out = 409, {"ok": False, "message": str(exc)[:300]}
+            except (ValueError, OSError, AttributeError) as exc:
+                status, out = 400, {"ok": False, "message": str(exc)[:300]}
+            body = json.dumps(out).encode()
+            self.send_response(status)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Cache-Control", "no-store")
+            self.end_headers()
+            self.wfile.write(body)
+
         def _waitlist(self):
             """Waitlist actions (u2-waitlist WF4); same CSRF/Host/Origin checks as /api/act."""
             status, out = 200, {}
             try:
-                office_actions.check_request(self.headers, self.server.server_address[1])
-                length = int(self.headers.get("Content-Length") or 0)
-                if length > 4096:
-                    raise office_actions.Refused("request too large")
-                out = office_waitlist.act(json.loads(self.rfile.read(length) or b"{}"))
+                out = office_waitlist.act(json.loads(self._body(4096) or b"{}"))
                 office_waitlist.PANEL.invalidate()
             except office_actions.Refused as exc:   # "error" lets csrf.js retry once on a stale token
                 status, out = 403, {"ok": False, "error": str(exc), "message": str(exc)}
@@ -831,9 +862,7 @@ def make_handler(cache, brand_cfg=None):
         def _transcribe(self):
             status, out = 200, {}
             try:
-                office_actions.check_request(self.headers, self.server.server_address[1])
-                length = int(self.headers.get("Content-Length") or 0)
-                out = {"text": voice.transcribe(self.rfile.read(length) if length else b"")}
+                out = {"text": voice.transcribe(self._body(voice.settings()[0]["max_bytes"]))}
             except office_actions.Refused as exc:
                 status, out = 403, {"error": str(exc)}
             except (voice.VoiceError, subprocess.TimeoutExpired, ValueError) as exc:
@@ -848,11 +877,7 @@ def make_handler(cache, brand_cfg=None):
         def _meeting(self):
             status, out = 200, {}
             try:
-                office_actions.check_request(self.headers, self.server.server_address[1])
-                length = int(self.headers.get("Content-Length") or 0)
-                if length > 16384:
-                    raise office_actions.Refused("request too large")
-                req = json.loads(self.rfile.read(length) or b"{}")
+                req = json.loads(self._body(16384) or b"{}")
                 op, text = req.get("op"), (req.get("text") or "").strip()
                 if op == "say" and not 0 < len(text) <= office_actions.MAX_REPLY:
                     raise office_actions.Refused(f"text must be 1-{office_actions.MAX_REPLY} characters")

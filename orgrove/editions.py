@@ -70,6 +70,11 @@ PARTS = {
          "infra/monitor-readonly.yaml", "bin/orgrove-monitor-setup", "orgrove/office_static/floor2.js", "orgrove/office_static/layout_floor2.js",
          "orgrove/office_static/floor2.html", "config/monitoring.toml"),
         pages=("/floor2", "/floor2.html"), api=("/api/floor2",), edition="Enterprise"),
+    "sessions_live": Part(
+        "Live detail on your coding sessions",
+        "In the 3D office, each of your coding sessions shows what it is doing and how full its context is, an optional chime tells you when one needs you, and, if you turn it on, permission prompts are exact.",
+        ("orgrove/office_sessions_live.py", "orgrove/office_static/chime.js", "orgrove/session_hook.py",
+         "orgrove/session_hooks.py", "bin/orgrove-session-hooks"), api=("/api/sessions/hooks",)),
     "wiki": Part(
         "The project wiki",
         "Nightly pages on the team's work, with your to-do list.",

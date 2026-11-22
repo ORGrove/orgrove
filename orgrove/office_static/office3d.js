@@ -7,8 +7,8 @@ import { OrbitControls } from "three/addons/OrbitControls.js";
 import { CSS2DRenderer, CSS2DObject } from "three/addons/CSS2DRenderer.js";
 import { RoomEnvironment } from "three/addons/RoomEnvironment.js";
 import { RoundedBoxGeometry } from "three/addons/RoundedBoxGeometry.js";
-import { placements, seatOf as seatIn, meetingRoom } from "/office_place.js";
-import { LAYOUT, LOUNGE_SEATS, FOOSBALL } from "/layout_classic.js";
+import { placements, seatOf as seatIn, meetingRoom, sessionSeats } from "/office_place.js";
+import { LAYOUT, LOUNGE_SEATS, FOOSBALL, SESSION_DESKS, SESSION_SEAT_DX, SESSION_SEATS, SESSION_DOOR } from "/layout_classic.js";
 import { buildFoosball } from "/foosball.js";
 import { EDITION } from "/edition.js";
 
@@ -27,7 +27,8 @@ const ROLE = {
   cto:      { name: "CTO (you)", team: "Leadership",          shirt: 0x2f3542 },
   finance:  { name: "Finance",   team: "Finance",             shirt: 0x4fae9b },
 };
-const roleInfo = (r) => ROLE[r] || { name: r, team: "Other", shirt: 0x9aa5b1 };
+const roleInfo = (r) => ROLE[r] || (r.startsWith("session:") ? { name: "Your session", team: "Sessions", shirt: 0x2f6fd6 }
+  : { name: r, team: "Other", shirt: 0x9aa5b1 });
 let PEOPLE = {};   // role -> person name, from config/people.toml (#137)
 const personLabel = (r) => PEOPLE[r] ? `${PEOPLE[r].split(" ")[0]} · ${roleInfo(r).name}` : roleInfo(r).name;
 const esc = (t) => String(t ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c]);
@@ -196,7 +197,14 @@ const ALWAYS = EDITION.finance ? ["cto", "finance"] : ["cto"];
 const ctoTag = label("…", "tag", 14, 3.1, -11.4);
 
 // front row: the lounge (right); no review room (owner, 2026-10-30): QA and Security review at their desks
-rbox(4.2, 0.12, 1.6, 0xf3f1ec, -14, 0.8, 9.8, 0.05); for (const dx of [-1.8, 1.8]) rbox(0.12, 0.76, 1.4, 0xbfc5cc, -14 + dx, 0.4, 9.8, 0.04);
+// The owner's own coding sessions (plan 2026-11-20): the old front-left desk, four seats (owner, 2026-11-21); nothing else added.
+for (const [sx, sz] of SESSION_DESKS) {
+  rbox(4.2, 0.12, 1.6, 0xf3f1ec, sx, 0.8, sz, 0.05); for (const dx of [-1.8, 1.8]) rbox(0.12, 0.76, 1.4, 0xbfc5cc, sx + dx, 0.4, sz, 0.04);
+  for (const dx of SESSION_SEAT_DX) rbox(0.62, 0.05, 0.42, C.screen, sx + dx, 0.88, sz - 0.2, 0.02);      // a laptop per seat
+}
+for (const [x, z] of SESSION_SEATS) rbox(0.74, 0.12, 0.74, C.chair, x, 0.52, z, 0.15);
+label("Your coding sessions", "zone", -14, 0.1, 12.2);
+const sessionsTag = label("", "tag", -14, 2.6, 5.4); sessionsTag.visible = false;
 
 const loungeRug = rbox(10, 0.04, 7.2, 0xe2c29c, 13.5, 0.085, 9.6, 0.02); loungeRug.userData = { kind: "room", id: "lounge" }; pickables.push(loungeRug);
 label("Lounge · on a break", "zone", 13.5, 0.1, 13.8);
@@ -365,6 +373,76 @@ function placeAll() {
   foosers = (plan.foosball || []).map((role) => people.get(role));
 }
 let pingpong = [], foosers = [];
+
+// ---------- the owner's own coding sessions (/api/sessions, plan 2026-11-20) -----------------------------
+// Read from this laptop's session transcripts by the Office server; the page gets a project name and a state,
+// never what was written. Each session sits at the session desk. Its helpers (sub-agents) are a count on its tag and
+// panel, not more people: the room must never look crowded (owner, 2026-11-21).
+const SESSION_WHY = { question: "asked you a question", plan: "has a plan for you to approve", permission: "is asking your permission", "maybe-permission": "may need your permission" };
+let SESS = { sessions: [] }, sessSeat = new Map(), sessPlaced = false;
+const forHowLong = (t) => { const m = Math.max(0, Math.round((Date.now() / 1000 - t) / 60)); return m < 1 ? "just now" : m < 60 ? m + " min" : Math.floor(m / 60) + " h " + (m % 60) + " min"; };
+function sessionText(x) {
+  if (x.state === "waiting") return "waiting for you: " + (SESSION_WHY[x.why] || "needs you");
+  return x.state === "working" ? "working" : "finished its turn";
+}
+function removePerson(p) {
+  scene.remove(p.g); people.delete(p.role);
+  for (let i = pickables.length - 1; i >= 0; i--) if (pickables[i].userData?.role === p.role) pickables.splice(i, 1);
+  p.g.traverse((o) => { if (o.isCSS2DObject) o.element.remove(); });
+  if (selectedRole === p.role) selectedRole = null;
+}
+function sessionPerson(key) {
+  let p = people.get(key);
+  if (p) { p.leaving = false; return p; }
+  p = makePerson(key);
+  p.g.traverse((o) => { if (o.isMesh) o.userData = { kind: "session", role: key }; });
+  p.need = label("?", "need", 0, 2.9, 0, p.g); p.need.visible = false;
+  if (sessPlaced) { p.g.position.set(SESSION_DOOR[0], 0, SESSION_DOOR[1]); }   // a new session walks in
+  people.set(key, p);
+  return p;
+}
+function applySessions(d) {
+  SESS = d;
+  const list = d.sessions || [];
+  const { seat, overflow } = sessionSeats(list, sessSeat, SESSION_SEATS.length);
+  sessSeat = seat;
+  const live = new Set();
+  for (const x of list) {
+    if (!seat.has(x.id)) continue;
+    const [sx, sz, face] = SESSION_SEATS[seat.get(x.id)];
+    const key = "session:" + x.id, p = sessionPerson(key);
+    live.add(key);
+    p.working = x.state === "working";
+    if (!sessPlaced) { p.g.position.set(sx, 0, sz); p.pose = x.state === "working" ? "type" : "sit"; p.facing = face; }
+    moveTo(p, V(sx, sz), x.state === "working" ? "type" : "sit", face);
+    p.need.visible = x.state === "waiting";
+    p.need.element.className = "need" + (x.why === "maybe-permission" ? " maybe" : "");
+    p.tag.element.innerHTML = `<i style="background:${x.state === "waiting" ? "#c27a12" : x.state === "working" ? "#2f9e6e" : "#9aa5b1"}"></i>${esc(x.project)} <small>${esc(sessionText(x))}${x.helpers.length ? ` · ${x.helpers.length} helper${x.helpers.length > 1 ? "s" : ""}` : ""}</small>`;
+  }
+  for (const p of [...people.values()]) {                 // a session that ended walks out of the door
+    if (!p.role.startsWith("session:") || live.has(p.role) || p.leaving) continue;
+    p.leaving = true; p.need.visible = false;
+    routeTo(p, V(SESSION_DOOR[0], SESSION_DOOR[1]), "stand", -Math.PI / 2);
+    if (!p.path.length) removePerson(p);
+  }
+  sessionsTag.visible = overflow > 0;
+  sessionsTag.element.innerHTML = `<i style="background:#2f6fd6"></i>+${overflow} more session${overflow > 1 ? "s" : ""} <small>see the 2D page</small>`;
+  sessPlaced = true;
+}
+function sessionPanel(key) {
+  const id = key.slice(8), x = (SESS.sessions || []).find((s) => s.id === id);
+  if (!x) return `<h3>Session ended</h3><p class="muted">This coding session has closed or gone quiet for 2 minutes.</p>`;
+  return `<h3>${esc(x.project)} · your coding session</h3>`
+    + `<p>${esc(sessionText(x)[0].toUpperCase() + sessionText(x).slice(1))}${x.since ? " · " + forHowLong(x.since) : ""}.</p>`
+    + (x.why === "maybe-permission" ? `<p class="muted">A guess: a tool has run 7 s with nothing new, which is how a permission prompt looks from here.</p>` : "")
+    + (x.helpers.length ? `<p>${x.helpers.length} helper${x.helpers.length > 1 ? "s" : ""} (sub-agents) working for it: `
+      + x.helpers.map((h) => esc(h.kind || "helper") + (h.state === "waiting" ? " (waiting for you)" : "")).join(", ") + `.</p>` : "")
+    + `<p class="muted">Read from this laptop's session files; nothing you or Claude wrote reaches this page.</p>`;
+}
+async function loadSessions() {
+  try { applySessions(await (await fetch("/api/sessions", { cache: "no-store" })).json()); } catch (e) { /* the state poll reports a dead server */ }
+}
+loadSessions(); setInterval(loadSessions, 1000);   // local files only: cheap enough every second
 
 function apply(s) {
   STATE = s;
@@ -608,6 +686,8 @@ renderer.domElement.addEventListener("pointerdown", (ev) => { downAt = [ev.clien
 renderer.domElement.addEventListener("click", (ev) => {
   if (downAt && Math.hypot(ev.clientX - downAt[0], ev.clientY - downAt[1]) > 5) return;
   const u = hit(ev); selectedRole = u?.kind === "agent" ? u.role : null;
+  if (u?.kind === "session") selectedRole = u.role;               // a session's name shows on click too
+  if (u?.kind === "session") return show(() => sessionPanel(u.role));
   if (!u?.kind || !STATE) return;
   if (u.kind === "agent") show(u.role === "cto" ? roomPanel("cto") : agentPanel(u.role));  // the CTO's cabin is the CTO's view
   else if (u.kind === "room") show(roomPanel(u.id));
@@ -930,7 +1010,7 @@ renderer.setAnimationLoop(() => {
     if (p.path.length) {                               // walking: only because the real state changed
       const next = p.path[0], to = next.clone().sub(p.g.position); to.y = 0;
       const dist = to.length(), step = (still ? 99 : 2.6) * dt;
-      if (dist <= step) { p.g.position.copy(next); p.path.shift(); if (!p.path.length) { p.pose = p.after.pose; p.facing = p.after.facing; if (MTG?.active) { renderBubbles(); renderDock(); } } }
+      if (dist <= step) { p.g.position.copy(next); p.path.shift(); if (!p.path.length) { p.pose = p.after.pose; p.facing = p.after.facing; if (p.leaving) { removePerson(p); continue; } if (MTG?.active) { renderBubbles(); renderDock(); } } }
       else { p.g.position.add(to.normalize().multiplyScalar(step)); p.g.rotation.y = Math.atan2(to.x, to.z); }
       const sw = still ? 0 : Math.sin(t * 9) * 0.55;
       p.legL.rotation.x = sw; p.legR.rotation.x = -sw; p.armL.rotation.x = -sw * 0.7; p.armR.rotation.x = sw * 0.7; p.body.position.y = Math.abs(Math.sin(t * 9)) * 0.05;

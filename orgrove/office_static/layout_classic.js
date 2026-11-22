@@ -12,3 +12,10 @@ export const BREAK_SPOTS = [
                              [-4.6, 12.2, 0.6, "stand"], [13.5, 10.3, 0, "stand"], [-9.0, 6.0, 0, "stand"]] },
 ];
 export const LAYOUT = { breakSpots: BREAK_SPOTS, loungeSeats: LOUNGE_SEATS.length, meetingSeats: 13 };   // 13 since 2026-11-02 (layout_new.js)
+// "Your coding sessions" desk (plan 2026-11-20): the existing front-left desk, four seats facing the back wall (owner,
+// 2026-11-21: four, so it does not look odd). No more desks: the room must never look crowded; a fifth session is a
+// "+1 more" tag, in full on the 2D page.
+export const SESSION_DESKS = [[-14, 9.8]];
+export const SESSION_SEAT_DX = [-1.5, -0.5, 0.5, 1.5];
+export const SESSION_SEATS = SESSION_DESKS.flatMap(([x, z]) => SESSION_SEAT_DX.map((dx) => [x + dx, z + 1.0, Math.PI]));
+export const SESSION_DOOR = [-20.4, 4.2];                // where a session walks in from, and out to
